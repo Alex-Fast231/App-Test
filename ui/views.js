@@ -4177,6 +4177,17 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
     compareDeDates(String(b?.date || ""), String(a?.date || ""))
     || collatorDE.compare(String(b?.createdAt || ""), String(a?.createdAt || ""))
   );
+  const knownRouteMap = new Map();
+  (overview.knownRoutes || []).forEach((route) => {
+    const from = String(route?.fromPointId || "");
+    const to = String(route?.toPointId || "");
+    if (!from || !to) return;
+    const key = [from, to].sort().join("|");
+    if (!knownRouteMap.has(key)) knownRouteMap.set(key, route);
+  });
+  const knownRoutes = [...knownRouteMap.values()].sort((a, b) =>
+    collatorDE.compare(`${a.fromLabel || ""} ${a.toLabel || ""}`, `${b.fromLabel || ""} ${b.toLabel || ""}`)
+  );
   const editingItem = editTravelId ? travelLog.find((item) => item.travelId === editTravelId) || null : null;
   const formTitle = editingItem ? "Fahrt bearbeiten" : "Manuelle Fahrt ergänzen";
   const formHint = editingItem
@@ -4252,6 +4263,25 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
             </div>
           </div>
         `).join("")}
+      </div>
+    </details>
+
+    <details class="accordion">
+      <summary>
+        <span>Bekannte Strecken</span>
+        <span class="muted">${knownRoutes.length}</span>
+      </summary>
+      <div class="accordion-body">
+        ${knownRoutes.length === 0 ? `<p class="muted">Noch keine gespeicherten Strecken vorhanden.</p>` : ""}
+        ${knownRoutes.map((route, index) => `
+          <div class="compact-card">
+            <div style="font-weight:600;">${escapeHtml(route.fromLabel || "—")} → ${escapeHtml(route.toLabel || "—")}</div>
+            <label for="knownRouteKm${index}">Kilometer</label>
+            <input id="knownRouteKm${index}" type="number" min="0" step="0.1" value="${escapeHtml(String(route.km ?? ""))}" placeholder="z.B. 7.5">
+            <button class="secondary saveKnownRouteKmBtn" data-input-id="knownRouteKm${index}" data-from-point-id="${escapeHtml(route.fromPointId || "")}" data-to-point-id="${escapeHtml(route.toPointId || "")}" data-from-label="${escapeHtml(route.fromLabel || "")}" data-to-label="${escapeHtml(route.toLabel || "")}">Kilometer speichern</button>
+          </div>
+        `).join("")}
+        <div id="knownRoutesMsg"></div>
       </div>
     </details>
 
@@ -4417,6 +4447,32 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
   document.querySelectorAll(".editTravelBtn").forEach((btn) => {
     btn.onclick = () => {
       showKilometerView({ onLock, summaryFrom, summaryTo, editTravelId: btn.dataset.travelId || "" });
+    };
+  });
+
+  document.querySelectorAll(".saveKnownRouteKmBtn").forEach((btn) => {
+    btn.onclick = async () => {
+      const msg = document.getElementById("knownRoutesMsg");
+      if (msg) {
+        msg.className = "error";
+        msg.textContent = "";
+      }
+
+      try {
+        const input = document.getElementById(btn.dataset.inputId || "");
+        saveKnownKilometerRoute({
+          fromPointId: btn.dataset.fromPointId || "",
+          toPointId: btn.dataset.toPointId || "",
+          fromLabel: btn.dataset.fromLabel || "",
+          toLabel: btn.dataset.toLabel || "",
+          km: input ? input.value : ""
+        });
+        await queuePersistRuntimeData();
+        showKilometerView({ onLock, summaryFrom, summaryTo, editTravelId });
+      } catch (err) {
+        console.error(err);
+        if (msg) msg.textContent = err?.message || "Strecke konnte nicht gespeichert werden.";
+      }
     };
   });
 

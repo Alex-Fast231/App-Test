@@ -376,8 +376,21 @@ export function saveKnownKilometerRoute(payload) {
       }
     };
 
-    upsert(fromPointId, toPointId, String(payload?.fromLabel || "").trim(), String(payload?.toLabel || "").trim());
-    upsert(toPointId, fromPointId, String(payload?.toLabel || "").trim(), String(payload?.fromLabel || "").trim());
+    const fromLabel = String(payload?.fromLabel || "").trim();
+    const toLabel = String(payload?.toLabel || "").trim();
+
+    upsert(fromPointId, toPointId, fromLabel, toLabel);
+    upsert(toPointId, fromPointId, toLabel, fromLabel);
+
+    (kilometerState.travelLog || []).forEach((item) => {
+      const isSameDirection = item.fromPointId === fromPointId && item.toPointId === toPointId;
+      const isOppositeDirection = item.fromPointId === toPointId && item.toPointId === fromPointId;
+      if (!isSameDirection && !isOppositeDirection) return;
+      if (item.manualAdjusted === true) return;
+
+      item.km = km;
+      item.updatedAt = now;
+    });
   });
 }
 
