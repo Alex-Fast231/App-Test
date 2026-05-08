@@ -3853,6 +3853,11 @@ export function showAbgabeView({ onLock, searchText = "", selectedIds = [] }) {
         createdAt,
         snapshotHtml: bodyHtml
       });
+      chosenRows.forEach((row) => {
+        if (row.homeId && row.patientId && row.rezeptId) {
+          markRezeptAbgegeben(row.homeId, row.patientId, row.rezeptId);
+        }
+      });
       await queuePersistRuntimeData();
       showAbgabeView({ onLock, searchText, selectedIds: [] });
     } catch (err) {
