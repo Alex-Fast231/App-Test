@@ -3876,7 +3876,29 @@ export function showAbgabeView({ onLock, searchText = "", selectedIds = [] }) {
       createdAt: new Date().toISOString()
     });
 
-    openHtmlDocument("Abgabeliste", bodyHtml, { autoPrint: true });
+    const printWindow = openHtmlDocument("Abgabeliste", bodyHtml, { autoPrint: false });
+    if (!printWindow) return;
+
+    let statusUpdated = false;
+    printWindow.onafterprint = async () => {
+      if (statusUpdated) return;
+      statusUpdated = true;
+
+      try {
+        chosenRows.forEach((row) => {
+          if (row.homeId && row.patientId && row.rezeptId) {
+            markRezeptAbgegeben(row.homeId, row.patientId, row.rezeptId);
+          }
+        });
+        await queuePersistRuntimeData();
+        showAbgabeView({ onLock, searchText, selectedIds: [] });
+      } catch (err) {
+        console.error(err);
+        alert("Abgabeliste wurde erstellt, aber der Rezeptstatus konnte nicht automatisch auf abgegeben gesetzt werden.");
+      }
+    };
+
+    printWindow.print();
   };
 
   document.querySelectorAll('.abgabe-history-open-btn').forEach((button) => {

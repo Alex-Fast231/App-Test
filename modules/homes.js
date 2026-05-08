@@ -999,6 +999,7 @@ export function buildAbgabeRows(data) {
   (data.homes || []).forEach((home) => {
     (home.patients || []).forEach((patient) => {
       (patient.rezepte || []).forEach((rezept) => {
+        if (rezept?.abgegeben === true) return;
         rows.push({
           rowId: `${home.homeId}_${patient.patientId}_${rezept.rezeptId}`,
           heim: home.name || "",
@@ -1305,6 +1306,7 @@ export function buildAbgabeTree(data) {
       const rezepte = [];
 
       (patient.rezepte || []).forEach((rezept) => {
+        if (rezept?.abgegeben === true) return;
         rezepte.push({
           rowId: `${home.homeId}_${patient.patientId}_${rezept.rezeptId}`,
           rezeptId: rezept.rezeptId,
