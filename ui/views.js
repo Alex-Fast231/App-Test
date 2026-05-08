@@ -2338,7 +2338,7 @@ export function showHomesView({ onLock, searchText = "" }) {
               <div style="flex:1; min-width:0;">
                 <div style="font-weight:700;">${escapeHtml(home.name || "Ohne Name")}</div>
                 <div class="compact-meta">${escapeHtml(home.adresse || "Keine Adresse")}</div>
-                <div class="compact-meta">${home.patients?.length || 0} Patient(en)</div>
+                <div class="compact-meta">${(home.patients || []).filter((patient) => patient?.verstorben !== true).length} Patient(en)</div>
               </div>
               <button class="secondary editHomeToggleBtn" data-home-id="${home.homeId}" title="Heim bearbeiten" aria-label="Heim bearbeiten" style="width:auto; padding:8px 10px;">✎</button>
             </div>
@@ -2487,7 +2487,7 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
     return;
   }
 
-  const filteredPatients = sortPatientsAlpha(searchPatientsInHome(home, searchText));
+  const filteredPatients = sortPatientsAlpha(searchPatientsInHome(home, searchText).filter((patient) => patient?.verstorben !== true));
 
   render(`
     <div class="card">
