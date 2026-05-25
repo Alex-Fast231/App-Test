@@ -854,27 +854,9 @@ export function createRezeptEntry(homeId, patientId, rezeptId, payload) {
     ensureRezeptTimeState(rezept);
 
     const entryId = generateId("entry");
-    let linkedTimeEntryId = "";
+    const linkedTimeEntryId = "";
     const entryDate = normalizeDateString(payload.date);
     const autoMinutes = getAutomaticTreatmentMinutes(rezept);
-    const alreadyCreditedToday = (rezept.timeEntries || []).some((item) => {
-      const itemDate = normalizeDateString(item?.date);
-      return item.type === "behandlung" && itemDate === entryDate;
-    });
-
-    if (autoMinutes > 0 && !alreadyCreditedToday) {
-      const timeEntry = createTimeEntryObject({
-        date: entryDate,
-        minutes: autoMinutes,
-        type: "behandlung",
-        note: "Automatisch aus Dokumentation",
-        sourceEntryId: entryId,
-        confirmed: true
-      });
-      rezept.timeEntries.push(timeEntry);
-      linkedTimeEntryId = timeEntry.timeEntryId;
-      rezept.zeitMeta.lastTimeEntryAt = timeEntry.createdAt;
-    }
 
     rezept.entries.push({
       entryId,
@@ -1418,6 +1400,35 @@ export function createRezeptTimeEntry(homeId, patientId, rezeptId, payload) {
 }
 
 
+
+
+export function createManualTreatmentTimeEntry(homeId, patientId, rezeptId, payload) {
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    if (!home) throw new Error("Heim nicht gefunden");
+
+    const patient = getPatientById(home, patientId);
+    if (!patient) throw new Error("Patient nicht gefunden");
+
+    const rezept = getRezeptById(patient, rezeptId);
+    if (!rezept) throw new Error("Rezept nicht gefunden");
+
+    ensureRezeptTimeState(rezept);
+
+    const timeEntry = createTimeEntryObject({
+      ...payload,
+      type: "behandlung",
+      confirmed: true
+    });
+
+    if (!timeEntry.minutes) {
+      throw new Error("Behandlungszeit muss größer als 0 Minuten sein");
+    }
+
+    rezept.timeEntries.push(timeEntry);
+    rezept.zeitMeta.lastTimeEntryAt = timeEntry.createdAt;
+  });
+}
 
 export function deleteRezeptTimeEntry(homeId, patientId, rezeptId, timeEntryId) {
   mutateRuntimeData((data) => {
