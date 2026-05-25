@@ -27,7 +27,7 @@ function getSingleLeistungMinutes(type) {
   return 0;
 }
 
-function getAutomaticTreatmentMinutes(rezept) {
+export function getAutomaticTreatmentMinutes(rezept) {
   const items = Array.isArray(rezept?.items) ? rezept.items : [];
   if (items.length === 0) return 0;
 
@@ -1400,35 +1400,6 @@ export function createRezeptTimeEntry(homeId, patientId, rezeptId, payload) {
 }
 
 
-
-
-export function createManualTreatmentTimeEntry(homeId, patientId, rezeptId, payload) {
-  mutateRuntimeData((data) => {
-    const home = getHomeById(data, homeId);
-    if (!home) throw new Error("Heim nicht gefunden");
-
-    const patient = getPatientById(home, patientId);
-    if (!patient) throw new Error("Patient nicht gefunden");
-
-    const rezept = getRezeptById(patient, rezeptId);
-    if (!rezept) throw new Error("Rezept nicht gefunden");
-
-    ensureRezeptTimeState(rezept);
-
-    const timeEntry = createTimeEntryObject({
-      ...payload,
-      type: "behandlung",
-      confirmed: true
-    });
-
-    if (!timeEntry.minutes) {
-      throw new Error("Behandlungszeit muss größer als 0 Minuten sein");
-    }
-
-    rezept.timeEntries.push(timeEntry);
-    rezept.zeitMeta.lastTimeEntryAt = timeEntry.createdAt;
-  });
-}
 
 export function deleteRezeptTimeEntry(homeId, patientId, rezeptId, timeEntryId) {
   mutateRuntimeData((data) => {

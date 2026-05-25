@@ -48,11 +48,11 @@ import {
   buildAbgabeTree,
   buildNachbestellTree,
   createRezeptTimeEntry,
-  createManualTreatmentTimeEntry,
   deleteRezeptTimeEntry,
   getRezeptTimeEntries,
   getRezeptTimeSummary,
   getRezeptEntryAutoMinutes,
+  getAutomaticTreatmentMinutes,
   getPendingKilometerContext,
   saveKilometerStartPoint,
   saveKnownKilometerRoute,
@@ -3437,10 +3437,12 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId }) {
       <label for="entryText">Dokumentation</label>
       <input id="entryText" type="text" placeholder="Behandlung / Verlauf / Besonderheiten">
 
-      <p class="muted">Dokumentation und Zeit sind jetzt getrennt. Dokumentation erzeugt keine automatische Zeitbuchung mehr.</p>
+      <p class="muted">Dokumentation und Zeiterfassung sind getrennt. Zeit bitte separat erfassen.</p>
 
-      <button id="saveEntryBtn">Dokumentation speichern</button>
-      <button id="saveTreatmentTimeBtn" class="secondary" style="margin-top:10px;">Behandlungszeit erfassen</button>
+      <div class="row">
+        <button id="saveEntryBtn">Dokumentation speichern</button>
+        <button id="manualTimeBtn" class="secondary">Zeit erfassen</button>
+      </div>
       <div id="entryMsg"></div>
     </div>
 
@@ -3455,7 +3457,7 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId }) {
           <div class="card" style="margin-bottom:12px;padding:16px;">
             <p><strong>${escapeHtml(entry.date || "Ohne Datum")}</strong></p>
             <p>${escapeHtml(entry.text || "")}</p>
-            <p class="muted">Rezept-Zeitvorschlag: ${escapeHtml(formatMinutesLabel(getRezeptEntryAutoMinutes(rezept, entry)))}</p>
+            <p class="muted">Dokumentation ohne automatische Zeitbuchung</p>
             <div class="row" style="margin-top:10px;">
               <button class="editEntryBtn secondary" data-entry-id="${entry.entryId}">Eintrag bearbeiten</button>
               <button class="deleteEntryBtn danger" data-entry-id="${entry.entryId}">Eintrag löschen</button>
@@ -3556,39 +3558,39 @@ ${pendingKm.fromLabel} → ${pendingKm.toLabel}`, "");
     }
   };
 
-  const saveTreatmentTimeBtn = document.getElementById("saveTreatmentTimeBtn");
-  if (saveTreatmentTimeBtn) {
-    saveTreatmentTimeBtn.onclick = async () => {
+
+  const manualTimeBtn = document.getElementById("manualTimeBtn");
+  if (manualTimeBtn) {
+    manualTimeBtn.onclick = async () => {
+      const defaultMinutes = String(getAutomaticTreatmentMinutes(rezept) || 40);
+      const selected = window.prompt(`Zeit für ${patient.firstName} ${patient.lastName} eingeben (Minuten):`, defaultMinutes);
+      if (selected === null) return;
+
+      const minutes = Number(String(selected).replace(",", "."));
+      if (!Number.isFinite(minutes) || minutes <= 0) {
+        alert("Bitte gültige Minuten eingeben.");
+        return;
+      }
+
+      const date = document.getElementById("entryDate").value.trim() || formatDeDate(new Date());
+
       try {
-        const suggestedMinutes = getRezeptEntryAutoMinutes(rezept, { entryId: "temp" }) || 20;
-        const entered = window.prompt(`Wie viele Minuten sollen eingetragen werden?\n\nVorschlag laut Rezept: ${suggestedMinutes} Minuten`, String(suggestedMinutes));
-
-        if (entered === null) return;
-
-        const minutes = Number(String(entered).replace(",", "."));
-
-        if (!Number.isFinite(minutes) || minutes <= 0) {
-          alert("Bitte gültige Minuten eingeben.");
-          return;
-        }
-
-        const date = document.getElementById("entryDate").value.trim() || new Date().toLocaleDateString("de-DE");
-
-        createManualTreatmentTimeEntry(homeId, patientId, rezeptId, {
+        createRezeptTimeEntry(homeId, patientId, rezeptId, {
           date,
           minutes,
-          note: "Manuell erfasste Behandlungszeit"
+          note: "Manuell erfasst",
+          confirmed: true,
+          type: "behandlung"
         });
 
         await queuePersistRuntimeData();
         showRezeptDetailView({ onLock, homeId, patientId, rezeptId });
       } catch (err) {
         console.error(err);
-        alert(err?.message || "Behandlungszeit konnte nicht gespeichert werden.");
+        alert("Zeit konnte nicht gespeichert werden.");
       }
     };
   }
-
   document.querySelectorAll(".editEntryBtn").forEach((btn) => {
     btn.onclick = () => {
       showEditRezeptEntryView({
