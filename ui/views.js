@@ -4628,6 +4628,15 @@ export function resumeCurrentView({ onLock }) {
     return showSettingsView({ onLock });
   }
 
+  if (view === "zeiterfassung") {
+    return showZeiterfassungView({
+      onLock,
+      selectedHomeId: context.selectedHomeId || null,
+      selectedPatientId: context.selectedPatientId || null,
+      selectedRezeptId: context.selectedRezeptId || null
+    });
+  }
+
   showDashboardView({ onLock });
 }
 
@@ -4645,7 +4654,7 @@ function escapeHtml(value) {
 
 export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedPatientId = null, selectedRezeptId = null, successMsg = "" } = {}) {
   bindLockButton(onLock);
-  setCurrentView("zeiterfassung");
+  setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId });
 
   const runtimeData = getRuntimeData();
   const homes = sortHomesAlpha(runtimeData?.homes || []);
