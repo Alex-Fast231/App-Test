@@ -4654,7 +4654,6 @@ function escapeHtml(value) {
 
 export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedPatientId = null, selectedRezeptId = null, successMsg = "" } = {}) {
   bindLockButton(onLock);
-  setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId });
 
   const runtimeData = getRuntimeData();
   const homes = sortHomesAlpha(runtimeData?.homes || []);
@@ -4662,6 +4661,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
 
   // Schritt 1: Einrichtung wählen
   if (!selectedHomeId) {
+    setCurrentView("zeiterfassung", { selectedHomeId: null, selectedPatientId: null, selectedRezeptId: null });
     render(`
       <div class="card">
         <h2>Zeiterfassung</h2>
@@ -4701,6 +4701,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   );
 
   if (!selectedPatientId) {
+    setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId: null, selectedRezeptId: null });
     render(`
       <div class="card">
         <h2>Zeiterfassung</h2>
@@ -4761,6 +4762,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     }
 
     // Mehrere Rezepte – Auswahl anzeigen
+    setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId: null });
     render(`
       <div class="card">
         <h2>Zeiterfassung</h2>
@@ -4795,6 +4797,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   const rezept = aktiveRezepte.find(r => r.rezeptId === selectedRezeptId);
   if (!rezept) return showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
 
+  setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId });
   const autoMin = getAutomaticTreatmentMinutesForZeit(rezept);
 
   render(`
