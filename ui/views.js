@@ -4663,10 +4663,10 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
             : homes.map(home => {
                 const aktivePatients = (home.patients || []).filter(p => !isPatientDeceased(p));
                 return `
-                  <div class="compact-card" style="margin:0; padding:14px; cursor:pointer;" data-home-id="${escapeHtml(home.id || '')}">
+                  <button class="zeit-home-btn secondary" data-home-id="${escapeHtml(home.id || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
                     <div style="font-weight:700; font-size:16px;">${escapeHtml(home.name || '—')}</div>
                     <div class="compact-meta">${aktivePatients.length} Patient(en)</div>
-                  </div>`;
+                  </button>`;
               }).join('')
           }
         </div>
@@ -4676,7 +4676,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       </div>
     `);
 
-    document.querySelectorAll("[data-home-id]").forEach(el => {
+    document.querySelectorAll(".zeit-home-btn").forEach(el => {
       el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId: el.dataset.homeId });
     });
     document.getElementById("zeitBackDashboardBtn").onclick = () => showDashboardView({ onLock });
@@ -4707,10 +4707,10 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
             : aktivePatients.map(patient => {
                 const aktiveRezepte = (patient.rezepte || []).filter(r => !r.abgegeben);
                 return `
-                  <div class="compact-card" style="margin:0; padding:14px; cursor:pointer;" data-patient-id="${escapeHtml(patient.id || '')}">
+                  <button class="zeit-patient-btn secondary" data-patient-id="${escapeHtml(patient.id || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
                     <div style="font-weight:700; font-size:16px;">${escapeHtml(`${patient.lastName || ''}, ${patient.firstName || ''}`.replace(/^,\s*/, '').trim() || '—')}</div>
                     <div class="compact-meta">${aktiveRezepte.length} aktive${aktiveRezepte.length === 1 ? 's' : ''} Rezept${aktiveRezepte.length !== 1 ? 'e' : ''}</div>
-                  </div>`;
+                  </button>`;
               }).join('')
           }
         </div>
@@ -4720,7 +4720,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       </div>
     `);
 
-    document.querySelectorAll("[data-patient-id]").forEach(el => {
+    document.querySelectorAll(".zeit-patient-btn").forEach(el => {
       el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId: el.dataset.patientId });
     });
     document.getElementById("zeitBackHomeBtn").onclick = () => showZeiterfassungView({ onLock });
@@ -4767,11 +4767,11 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
           ${aktiveRezepte.map(rezept => {
             const autoMin = getAutomaticTreatmentMinutesForZeit(rezept);
             return `
-              <div class="compact-card" style="margin:0; padding:14px; cursor:pointer;" data-rezept-id="${escapeHtml(rezept.id || '')}">
+              <button class="zeit-rezept-btn secondary" data-rezept-id="${escapeHtml(rezept.id || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
                 <div style="font-weight:700; font-size:15px;">${escapeHtml(rezeptSummary(rezept))}</div>
                 <div class="compact-meta">Ausgestellt: ${escapeHtml(rezept.ausstell || '—')}</div>
                 <div class="compact-meta" style="color:var(--primary); font-weight:600;">${autoMin > 0 ? `${autoMin} Minuten` : 'Zeit nicht erkannt'}</div>
-              </div>`;
+              </button>`;
           }).join('')}
         </div>
         <div class="row" style="margin-top:16px;">
@@ -4780,7 +4780,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       </div>
     `);
 
-    document.querySelectorAll("[data-rezept-id]").forEach(el => {
+    document.querySelectorAll(".zeit-rezept-btn").forEach(el => {
       el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: el.dataset.rezeptId });
     });
     document.getElementById("zeitBackPatientBtn").onclick = () => showZeiterfassungView({ onLock, selectedHomeId });
