@@ -66,6 +66,7 @@ import {
 } from "../modules/homes.js";
 import { getRezeptFristInfo } from "../modules/fristen.js";
 import { exportBackup, importBackup, downloadBlob, validateBackupZip } from "../modules/backup.js";
+import { generateId } from "../core/utils.js";
 import {
   normalizeDeDateInput,
   parseDeDate,
@@ -1837,14 +1838,15 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
     <div class="card">
       <h3>Bereiche</h3>
       <div class="row">
-        <button id="openHomesBtn">Einrichtungen</button>
+        <button id="openZeiterfassungBtn">⏱ Zeiterfassung</button>
+        <button id="openHomesBtn" class="secondary">Einrichtungen</button>
+      </div>
+      <div class="row">
         <button id="openAbgabeBtn" class="secondary">Abgabeliste</button>
-      </div>
-      <div class="row">
         <button id="openNachbestellBtn" class="secondary">Nachbestellung</button>
-        <button id="openKilometerBtn" class="secondary">Kilometer</button>
       </div>
       <div class="row">
+        <button id="openKilometerBtn" class="secondary">Kilometer</button>
         <button id="lockNowBtn" class="secondary">Jetzt sperren</button>
       </div>
     </div>
@@ -1879,6 +1881,7 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
   `);
 
   document.getElementById("openSettingsBtn").onclick = () => showSettingsView({ onLock });
+  document.getElementById("openZeiterfassungBtn").onclick = () => showZeiterfassungView({ onLock });
   document.getElementById("openHomesBtn").onclick = () => showHomesView({ onLock });
   document.getElementById("openAbgabeBtn").onclick = () => showAbgabeView({ onLock });
   document.getElementById("openNachbestellBtn").onclick = () => showNachbestellungView({ onLock });
@@ -4635,4 +4638,263 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+// ─────────────────────────────────────────────
+// ZEITERFASSUNG – Phase 2
+// ─────────────────────────────────────────────
+
+export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedPatientId = null, selectedRezeptId = null, successMsg = "" } = {}) {
+  bindLockButton(onLock);
+  setCurrentView("zeiterfassung");
+
+  const runtimeData = getRuntimeData();
+  const homes = (runtimeData?.homes || []).filter(h => !h.deleted);
+  const today = formatCurrentDateShort();
+
+  // Schritt 1: Einrichtung wählen
+  if (!selectedHomeId) {
+    render(`
+      <div class="card">
+        <h2>Zeiterfassung</h2>
+        <p class="muted">Einrichtung auswählen:</p>
+        <div class="list-stack">
+          ${homes.length === 0
+            ? `<p class="muted">Keine Einrichtungen vorhanden.</p>`
+            : homes.map(home => {
+                const aktivePatients = (home.patients || []).filter(p => !isPatientDeceased(p));
+                return `
+                  <div class="compact-card" style="margin:0; padding:14px; cursor:pointer;" data-home-id="${escapeHtml(home.id || '')}">
+                    <div style="font-weight:700; font-size:16px;">${escapeHtml(home.name || '—')}</div>
+                    <div class="compact-meta">${aktivePatients.length} Patient(en)</div>
+                  </div>`;
+              }).join('')
+          }
+        </div>
+        <div class="row" style="margin-top:16px;">
+          <button id="zeitBackDashboardBtn" class="secondary">Zurück</button>
+        </div>
+      </div>
+    `);
+
+    document.querySelectorAll("[data-home-id]").forEach(el => {
+      el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId: el.dataset.homeId });
+    });
+    document.getElementById("zeitBackDashboardBtn").onclick = () => showDashboardView({ onLock });
+    return;
+  }
+
+  // Schritt 2: Patient wählen
+  const home = homes.find(h => h.id === selectedHomeId);
+  if (!home) return showZeiterfassungView({ onLock });
+
+  const aktivePatients = (home.patients || [])
+    .filter(p => !isPatientDeceased(p))
+    .sort((a, b) => {
+      const nameA = `${a.lastName || ""} ${a.firstName || ""}`.trim().toLowerCase();
+      const nameB = `${b.lastName || ""} ${b.firstName || ""}`.trim().toLowerCase();
+      return nameA.localeCompare(nameB);
+    });
+
+  if (!selectedPatientId) {
+    render(`
+      <div class="card">
+        <h2>Zeiterfassung</h2>
+        <div class="compact-meta" style="margin-bottom:12px;">${escapeHtml(home.name || '—')}</div>
+        <p class="muted">Patient auswählen:</p>
+        <div class="list-stack">
+          ${aktivePatients.length === 0
+            ? `<p class="muted">Keine aktiven Patienten.</p>`
+            : aktivePatients.map(patient => {
+                const aktiveRezepte = (patient.rezepte || []).filter(r => !r.abgegeben);
+                return `
+                  <div class="compact-card" style="margin:0; padding:14px; cursor:pointer;" data-patient-id="${escapeHtml(patient.id || '')}">
+                    <div style="font-weight:700; font-size:16px;">${escapeHtml(`${patient.lastName || ''}, ${patient.firstName || ''}`.replace(/^,\s*/, '').trim() || '—')}</div>
+                    <div class="compact-meta">${aktiveRezepte.length} aktive${aktiveRezepte.length === 1 ? 's' : ''} Rezept${aktiveRezepte.length !== 1 ? 'e' : ''}</div>
+                  </div>`;
+              }).join('')
+          }
+        </div>
+        <div class="row" style="margin-top:16px;">
+          <button id="zeitBackHomeBtn" class="secondary">Zurück</button>
+        </div>
+      </div>
+    `);
+
+    document.querySelectorAll("[data-patient-id]").forEach(el => {
+      el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId: el.dataset.patientId });
+    });
+    document.getElementById("zeitBackHomeBtn").onclick = () => showZeiterfassungView({ onLock });
+    return;
+  }
+
+  // Schritt 3: Rezept wählen (falls mehrere) oder direkt buchen
+  const patient = aktivePatients.find(p => p.id === selectedPatientId);
+  if (!patient) return showZeiterfassungView({ onLock, selectedHomeId });
+
+  const patientName = `${patient.lastName || ''}, ${patient.firstName || ''}`.replace(/^,\s*/, '').trim() || '—';
+  const aktiveRezepte = (patient.rezepte || []).filter(r => !r.abgegeben);
+
+  if (!selectedRezeptId) {
+    if (aktiveRezepte.length === 0) {
+      render(`
+        <div class="card">
+          <h2>Zeiterfassung</h2>
+          <div style="font-weight:700; margin-bottom:4px;">${escapeHtml(patientName)}</div>
+          <div class="compact-meta" style="margin-bottom:12px;">${escapeHtml(home.name || '—')}</div>
+          <p class="muted">Keine aktiven Rezepte vorhanden.</p>
+          <div class="row" style="margin-top:16px;">
+            <button id="zeitBackPatientBtn" class="secondary">Zurück</button>
+          </div>
+        </div>
+      `);
+      document.getElementById("zeitBackPatientBtn").onclick = () => showZeiterfassungView({ onLock, selectedHomeId });
+      return;
+    }
+
+    if (aktiveRezepte.length === 1) {
+      // Direkt zum Buchen weitergehen
+      return showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: aktiveRezepte[0].id });
+    }
+
+    // Mehrere Rezepte – Auswahl anzeigen
+    render(`
+      <div class="card">
+        <h2>Zeiterfassung</h2>
+        <div style="font-weight:700; margin-bottom:4px;">${escapeHtml(patientName)}</div>
+        <div class="compact-meta" style="margin-bottom:12px;">${escapeHtml(home.name || '—')}</div>
+        <p class="muted">Rezept auswählen:</p>
+        <div class="list-stack">
+          ${aktiveRezepte.map(rezept => {
+            const autoMin = getAutomaticTreatmentMinutesForZeit(rezept);
+            return `
+              <div class="compact-card" style="margin:0; padding:14px; cursor:pointer;" data-rezept-id="${escapeHtml(rezept.id || '')}">
+                <div style="font-weight:700; font-size:15px;">${escapeHtml(rezeptSummary(rezept))}</div>
+                <div class="compact-meta">Ausgestellt: ${escapeHtml(rezept.ausstell || '—')}</div>
+                <div class="compact-meta" style="color:var(--primary); font-weight:600;">${autoMin > 0 ? `${autoMin} Minuten` : 'Zeit nicht erkannt'}</div>
+              </div>`;
+          }).join('')}
+        </div>
+        <div class="row" style="margin-top:16px;">
+          <button id="zeitBackPatientBtn" class="secondary">Zurück</button>
+        </div>
+      </div>
+    `);
+
+    document.querySelectorAll("[data-rezept-id]").forEach(el => {
+      el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: el.dataset.rezeptId });
+    });
+    document.getElementById("zeitBackPatientBtn").onclick = () => showZeiterfassungView({ onLock, selectedHomeId });
+    return;
+  }
+
+  // Schritt 4: Zeit buchen
+  const rezept = aktiveRezepte.find(r => r.id === selectedRezeptId);
+  if (!rezept) return showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
+
+  const autoMin = getAutomaticTreatmentMinutesForZeit(rezept);
+
+  render(`
+    <div class="card">
+      <h2>Zeit buchen</h2>
+      <div style="font-weight:700; margin-bottom:4px;">${escapeHtml(patientName)}</div>
+      <div class="compact-meta">${escapeHtml(home.name || '—')}</div>
+      <div class="compact-meta" style="margin-bottom:16px;">${escapeHtml(rezeptSummary(rezept))}</div>
+
+      ${successMsg ? `<div style="background:var(--success, #e6f4ea); color:#1a7f37; padding:10px 14px; border-radius:8px; margin-bottom:16px; font-weight:600;">${escapeHtml(successMsg)}</div>` : ''}
+
+      <div class="compact-card" style="margin:0 0 16px 0; padding:14px; text-align:center;">
+        <div class="compact-meta" style="margin-bottom:4px;">Automatische Zeit aus Rezept</div>
+        <div style="font-size:32px; font-weight:700; color:var(--primary);">${autoMin > 0 ? `${autoMin} Min` : '—'}</div>
+        ${rezept.dt ? `<div class="compact-meta" style="margin-top:4px;">Doppelbehandlung berücksichtigt</div>` : ''}
+      </div>
+
+      <label for="zeitNotizInput">Notiz (optional)</label>
+      <input id="zeitNotizInput" type="text" placeholder="z. B. Hausbesuch, Besonderheiten ...">
+
+      <div class="row" style="margin-top:16px;">
+        <button id="zeitBuchenBtn"${autoMin === 0 ? ' disabled' : ''}>Zeit buchen</button>
+        <button id="zeitBackRezeptBtn" class="secondary">Zurück</button>
+      </div>
+      <div id="zeitBuchenMsg" class="muted" style="margin-top:10px;"></div>
+    </div>
+  `);
+
+  document.getElementById("zeitBackRezeptBtn").onclick = () => {
+    if (aktiveRezepte.length === 1) {
+      showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
+    } else {
+      showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
+    }
+  };
+
+  if (autoMin > 0) {
+    document.getElementById("zeitBuchenBtn").onclick = async () => {
+      const notiz = document.getElementById("zeitNotizInput").value.trim();
+      const msg = document.getElementById("zeitBuchenMsg");
+      msg.textContent = "Wird gespeichert...";
+
+      try {
+        mutateRuntimeData(data => {
+          const h = (data.homes || []).find(x => x.id === selectedHomeId);
+          if (!h) return;
+          const p = (h.patients || []).find(x => x.id === selectedPatientId);
+          if (!p) return;
+          const r = (p.rezepte || []).find(x => x.id === selectedRezeptId);
+          if (!r) return;
+          if (!Array.isArray(r.timeEntries)) r.timeEntries = [];
+          r.timeEntries.push({
+            timeEntryId: generateId(),
+            date: today,
+            type: "behandlung",
+            minutes: autoMin,
+            notiz: notiz || "",
+            createdAt: new Date().toISOString()
+          });
+        });
+        await queuePersistRuntimeData();
+
+        // Erfolgreich – zurück zur Patientenliste mit Erfolgsmeldung
+        showZeiterfassungView({
+          onLock,
+          selectedHomeId,
+          successMsg: `✓ ${autoMin} Min für ${patientName} gebucht`
+        });
+      } catch (err) {
+        msg.textContent = "Fehler beim Speichern: " + err.message;
+      }
+    };
+  }
+}
+
+// Hilfsfunktion für Zeiterfassung – berechnet Minuten aus Rezept
+function getAutomaticTreatmentMinutesForZeit(rezept) {
+  const items = Array.isArray(rezept?.items) ? rezept.items : [];
+  if (items.length === 0) return 0;
+
+  function norm(type) {
+    return String(type || "").trim().toUpperCase().replace(/\s+/g, "").replace(/–/g, "-").replace(/—/g, "-");
+  }
+  function singleMin(type) {
+    const k = norm(type);
+    if (["KG", "MT", "KG-ZNS", "KGZNS", "MLD30", "BLANKO"].includes(k)) return 20;
+    if (k === "MLD45") return 40;
+    if (k === "MLD60") return 60;
+    return 0;
+  }
+
+  if (rezept?.bg) {
+    return items.reduce((sum, item) => sum + singleMin(item?.type), 0);
+  }
+
+  const hasBlanko = items.some(item => norm(item?.type) === "BLANKO");
+  if (hasBlanko) return 20;
+
+  const first = items.find(item => singleMin(item?.type) > 0);
+  if (!first) return 0;
+  const firstMin = singleMin(first.type);
+  const firstKey = norm(first.type);
+  const isFixedMLD = firstKey === "MLD45" || firstKey === "MLD60";
+
+  if (rezept?.dt && !isFixedMLD) return firstMin * 2;
+  return firstMin;
 }
