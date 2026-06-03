@@ -1,29 +1,8 @@
+import { parseDeDate, parseComparableDate, formatDeDate } from "../core/date-utils.js";
+
 function parseDEDateToDate(str) {
-  const s = String(str || "").trim();
-  const m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
-  if (!m) return null;
-
-  const dd = Number(m[1]);
-  const mm = Number(m[2]);
-  const yyyy = Number(m[3]);
-
-  const d = new Date(yyyy, mm - 1, dd);
-  if (
-    d.getFullYear() !== yyyy ||
-    d.getMonth() !== mm - 1 ||
-    d.getDate() !== dd
-  ) {
-    return null;
-  }
-
-  return d;
-}
-
-function formatDateDE(date) {
-  const dd = String(date.getDate()).padStart(2, "0");
-  const mm = String(date.getMonth() + 1).padStart(2, "0");
-  const yyyy = date.getFullYear();
-  return `${dd}.${mm}.${yyyy}`;
+  const comparable = parseDeDate(str);
+  return comparable ? parseComparableDate(comparable) : null;
 }
 
 function addDays(date, days) {
@@ -93,10 +72,10 @@ export function getRezeptFristInfo(rezept) {
 
     return {
       mode: "bg",
-      statusText: `Beginn bis ${formatDateDE(latestStart)}`,
+      statusText: `Beginn bis ${formatDeDate(latestStart)}`,
       detailsText: "BG: Beginn innerhalb 14 Tagen · gültig 2 Monate ab Ausstellungsdatum",
-      latestStartText: formatDateDE(latestStart),
-      validUntilText: formatDateDE(validUntil),
+      latestStartText: formatDeDate(latestStart),
+      validUntilText: formatDeDate(validUntil),
       traffic: getTrafficLevel(daysRemaining),
       daysRemaining
     };
@@ -109,10 +88,10 @@ export function getRezeptFristInfo(rezept) {
 
     return {
       mode: "blanko",
-      statusText: `Beginn bis ${formatDateDE(latestStart)}`,
+      statusText: `Beginn bis ${formatDeDate(latestStart)}`,
       detailsText: "Blanko: Beginn innerhalb 28 Tagen · gültig 4 Monate ab Ausstellungsdatum",
-      latestStartText: formatDateDE(latestStart),
-      validUntilText: formatDateDE(validUntil),
+      latestStartText: formatDeDate(latestStart),
+      validUntilText: formatDeDate(validUntil),
       traffic: getTrafficLevel(daysRemaining),
       daysRemaining
     };
@@ -127,9 +106,9 @@ export function getRezeptFristInfo(rezept) {
 
   return {
     mode: "normal",
-    statusText: `Beginn bis ${formatDateDE(latestStart)}`,
+    statusText: `Beginn bis ${formatDeDate(latestStart)}`,
     detailsText: `Gesamtmenge ${total}x · ${validRule}`,
-    latestStartText: formatDateDE(latestStart),
+    latestStartText: formatDeDate(latestStart),
     validUntilText: validRule,
     traffic: getTrafficLevel(daysRemaining),
     daysRemaining

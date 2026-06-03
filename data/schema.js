@@ -2,9 +2,7 @@ export const APP_SCHEMA_VERSION = 3;
 export const APP_VERSION = "3.0.0";
 export const APP_MODULE = "doku";
 
-export const PRACTICE_ADDRESS = `Münchener Str. 155
-85051 Ingolstadt
-Tel.: 0841-45674267`;
+export const PRACTICE_ADDRESS = ``;
 
 export function createEmptyAppData() {
   const now = new Date().toISOString();

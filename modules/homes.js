@@ -27,7 +27,7 @@ function getSingleLeistungMinutes(type) {
   return 0;
 }
 
-export function getAutomaticTreatmentMinutes(rezept) {
+function getAutomaticTreatmentMinutes(rezept) {
   const items = Array.isArray(rezept?.items) ? rezept.items : [];
   if (items.length === 0) return 0;
 
@@ -854,9 +854,27 @@ export function createRezeptEntry(homeId, patientId, rezeptId, payload) {
     ensureRezeptTimeState(rezept);
 
     const entryId = generateId("entry");
-    const linkedTimeEntryId = "";
+    let linkedTimeEntryId = "";
     const entryDate = normalizeDateString(payload.date);
     const autoMinutes = getAutomaticTreatmentMinutes(rezept);
+    const alreadyCreditedToday = (rezept.timeEntries || []).some((item) => {
+      const itemDate = normalizeDateString(item?.date);
+      return item.type === "behandlung" && itemDate === entryDate;
+    });
+
+    if (autoMinutes > 0 && !alreadyCreditedToday) {
+      const timeEntry = createTimeEntryObject({
+        date: entryDate,
+        minutes: autoMinutes,
+        type: "behandlung",
+        note: "Automatisch aus Dokumentation",
+        sourceEntryId: entryId,
+        confirmed: true
+      });
+      rezept.timeEntries.push(timeEntry);
+      linkedTimeEntryId = timeEntry.timeEntryId;
+      rezept.zeitMeta.lastTimeEntryAt = timeEntry.createdAt;
+    }
 
     rezept.entries.push({
       entryId,

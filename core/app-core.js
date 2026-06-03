@@ -9,7 +9,6 @@ let securityState = null;
 let currentView = "boot";
 let currentContext = {};
 let persistPromise = null;
-let persistScheduled = false;
 
 export function setRuntimeSession(session) {
   runtimeKey = session.runtimeKey ?? null;
@@ -84,14 +83,10 @@ export async function persistRuntimeData() {
 
 export function queuePersistRuntimeData() {
   if (persistPromise) return persistPromise;
-  if (persistScheduled) return persistPromise;
-
-  persistScheduled = true;
 
   persistPromise = new Promise((resolve, reject) => {
     queueMicrotask(async () => {
       try {
-        persistScheduled = false;
         await persistRuntimeData();
         resolve();
       } catch (err) {
