@@ -16,7 +16,6 @@ function addMonthsSafe(date, months) {
   const day = d.getDate();
   d.setDate(1);
   d.setMonth(d.getMonth() + months);
-
   const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
   d.setDate(Math.min(day, lastDay));
   return d;
@@ -24,13 +23,11 @@ function addMonthsSafe(date, months) {
 
 function totalAnwendungsmenge(items) {
   let sum = 0;
-
   (items || []).forEach((item) => {
     if (!item || item.type === "Blanko") return;
     const n = Number(item.count);
     if (Number.isFinite(n)) sum += n;
   });
-
   return sum;
 }
 
@@ -69,7 +66,6 @@ export function getRezeptFristInfo(rezept) {
     const latestStart = addDays(ausstellDate, 14);
     const validUntil = addMonthsSafe(ausstellDate, 2);
     const daysRemaining = diffDays(today, latestStart);
-
     return {
       mode: "bg",
       statusText: `Beginn bis ${formatDeDate(latestStart)}`,
@@ -85,7 +81,6 @@ export function getRezeptFristInfo(rezept) {
     const latestStart = addDays(ausstellDate, 28);
     const validUntil = addMonthsSafe(ausstellDate, 4);
     const daysRemaining = diffDays(today, latestStart);
-
     return {
       mode: "blanko",
       statusText: `Beginn bis ${formatDeDate(latestStart)}`,
