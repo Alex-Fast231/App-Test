@@ -4648,7 +4648,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   setCurrentView("zeiterfassung");
 
   const runtimeData = getRuntimeData();
-  const homes = (runtimeData?.homes || []).filter(h => !h.deleted);
+  const homes = sortHomesAlpha(runtimeData?.homes || []);
   const today = formatCurrentDateShort();
 
   // Schritt 1: Einrichtung wählen
@@ -4663,7 +4663,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
             : homes.map(home => {
                 const aktivePatients = (home.patients || []).filter(p => !isPatientDeceased(p));
                 return `
-                  <button class="zeit-home-btn secondary" data-home-id="${escapeHtml(home.id || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
+                  <button class="zeit-home-btn secondary" data-home-id="${escapeHtml(home.homeId || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
                     <div style="font-weight:700; font-size:16px;">${escapeHtml(home.name || '—')}</div>
                     <div class="compact-meta">${aktivePatients.length} Patient(en)</div>
                   </button>`;
@@ -4684,22 +4684,18 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   }
 
   // Schritt 2: Patient wählen
-  const home = homes.find(h => h.id === selectedHomeId);
+  const home = homes.find(h => h.homeId === selectedHomeId);
   if (!home) return showZeiterfassungView({ onLock });
 
-  const aktivePatients = (home.patients || [])
-    .filter(p => !isPatientDeceased(p))
-    .sort((a, b) => {
-      const nameA = `${a.lastName || ""} ${a.firstName || ""}`.trim().toLowerCase();
-      const nameB = `${b.lastName || ""} ${b.firstName || ""}`.trim().toLowerCase();
-      return nameA.localeCompare(nameB);
-    });
+  const aktivePatients = sortPatientsAlpha(
+    (home.patients || []).filter(p => !isPatientDeceased(p))
+  );
 
   if (!selectedPatientId) {
     render(`
       <div class="card">
         <h2>Zeiterfassung</h2>
-        <div class="compact-meta" style="margin-bottom:12px;">${escapeHtml(home.name || '—')}</div>
+        <div style="font-weight:700; margin-bottom:12px;">${escapeHtml(home.name || '—')}</div>
         <p class="muted">Patient auswählen:</p>
         <div class="list-stack">
           ${aktivePatients.length === 0
@@ -4707,7 +4703,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
             : aktivePatients.map(patient => {
                 const aktiveRezepte = (patient.rezepte || []).filter(r => !r.abgegeben);
                 return `
-                  <button class="zeit-patient-btn secondary" data-patient-id="${escapeHtml(patient.id || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
+                  <button class="zeit-patient-btn secondary" data-patient-id="${escapeHtml(patient.patientId || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
                     <div style="font-weight:700; font-size:16px;">${escapeHtml(`${patient.lastName || ''}, ${patient.firstName || ''}`.replace(/^,\s*/, '').trim() || '—')}</div>
                     <div class="compact-meta">${aktiveRezepte.length} aktive${aktiveRezepte.length === 1 ? 's' : ''} Rezept${aktiveRezepte.length !== 1 ? 'e' : ''}</div>
                   </button>`;
@@ -4728,7 +4724,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   }
 
   // Schritt 3: Rezept wählen (falls mehrere) oder direkt buchen
-  const patient = aktivePatients.find(p => p.id === selectedPatientId);
+  const patient = aktivePatients.find(p => p.patientId === selectedPatientId);
   if (!patient) return showZeiterfassungView({ onLock, selectedHomeId });
 
   const patientName = `${patient.lastName || ''}, ${patient.firstName || ''}`.replace(/^,\s*/, '').trim() || '—';
@@ -4752,8 +4748,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     }
 
     if (aktiveRezepte.length === 1) {
-      // Direkt zum Buchen weitergehen
-      return showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: aktiveRezepte[0].id });
+      return showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: aktiveRezepte[0].rezeptId });
     }
 
     // Mehrere Rezepte – Auswahl anzeigen
@@ -4767,7 +4762,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
           ${aktiveRezepte.map(rezept => {
             const autoMin = getAutomaticTreatmentMinutesForZeit(rezept);
             return `
-              <button class="zeit-rezept-btn secondary" data-rezept-id="${escapeHtml(rezept.id || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
+              <button class="zeit-rezept-btn secondary" data-rezept-id="${escapeHtml(rezept.rezeptId || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
                 <div style="font-weight:700; font-size:15px;">${escapeHtml(rezeptSummary(rezept))}</div>
                 <div class="compact-meta">Ausgestellt: ${escapeHtml(rezept.ausstell || '—')}</div>
                 <div class="compact-meta" style="color:var(--primary); font-weight:600;">${autoMin > 0 ? `${autoMin} Minuten` : 'Zeit nicht erkannt'}</div>
@@ -4788,7 +4783,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   }
 
   // Schritt 4: Zeit buchen
-  const rezept = aktiveRezepte.find(r => r.id === selectedRezeptId);
+  const rezept = aktiveRezepte.find(r => r.rezeptId === selectedRezeptId);
   if (!rezept) return showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
 
   const autoMin = getAutomaticTreatmentMinutesForZeit(rezept);
@@ -4800,7 +4795,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       <div class="compact-meta">${escapeHtml(home.name || '—')}</div>
       <div class="compact-meta" style="margin-bottom:16px;">${escapeHtml(rezeptSummary(rezept))}</div>
 
-      ${successMsg ? `<div style="background:var(--success, #e6f4ea); color:#1a7f37; padding:10px 14px; border-radius:8px; margin-bottom:16px; font-weight:600;">${escapeHtml(successMsg)}</div>` : ''}
+      ${successMsg ? `<div style="background:#e6f4ea; color:#1a7f37; padding:10px 14px; border-radius:8px; margin-bottom:16px; font-weight:600;">${escapeHtml(successMsg)}</div>` : ''}
 
       <div class="compact-card" style="margin:0 0 16px 0; padding:14px; text-align:center;">
         <div class="compact-meta" style="margin-bottom:4px;">Automatische Zeit aus Rezept</div>
@@ -4819,13 +4814,8 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     </div>
   `);
 
-  document.getElementById("zeitBackRezeptBtn").onclick = () => {
-    if (aktiveRezepte.length === 1) {
-      showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
-    } else {
-      showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
-    }
-  };
+  document.getElementById("zeitBackRezeptBtn").onclick = () =>
+    showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
 
   if (autoMin > 0) {
     document.getElementById("zeitBuchenBtn").onclick = async () => {
@@ -4835,15 +4825,15 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
 
       try {
         mutateRuntimeData(data => {
-          const h = (data.homes || []).find(x => x.id === selectedHomeId);
+          const h = (data.homes || []).find(x => x.homeId === selectedHomeId);
           if (!h) return;
-          const p = (h.patients || []).find(x => x.id === selectedPatientId);
+          const p = (h.patients || []).find(x => x.patientId === selectedPatientId);
           if (!p) return;
-          const r = (p.rezepte || []).find(x => x.id === selectedRezeptId);
+          const r = (p.rezepte || []).find(x => x.rezeptId === selectedRezeptId);
           if (!r) return;
           if (!Array.isArray(r.timeEntries)) r.timeEntries = [];
           r.timeEntries.push({
-            timeEntryId: generateId(),
+            timeEntryId: generateId("time"),
             date: today,
             type: "behandlung",
             minutes: autoMin,
@@ -4853,7 +4843,6 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
         });
         await queuePersistRuntimeData();
 
-        // Erfolgreich – zurück zur Patientenliste mit Erfolgsmeldung
         showZeiterfassungView({
           onLock,
           selectedHomeId,
