@@ -4758,6 +4758,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     }
 
     if (aktiveRezepte.length === 1) {
+      setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId: null });
       return showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: aktiveRezepte[0].rezeptId });
     }
 
