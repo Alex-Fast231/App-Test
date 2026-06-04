@@ -4838,13 +4838,13 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   const backBtn = document.getElementById("zeitBackRezeptBtn");
   backBtn.addEventListener("touchend", (e) => {
     e.preventDefault();
-    setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId: null });
-    showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
+    setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId: null, selectedRezeptId: null });
+    showZeiterfassungView({ onLock, selectedHomeId });
   });
   backBtn.addEventListener("click", (e) => {
     e.preventDefault();
-    setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId: null });
-    showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
+    setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId: null, selectedRezeptId: null });
+    showZeiterfassungView({ onLock, selectedHomeId });
   });
 
   if (autoMin > 0) {
