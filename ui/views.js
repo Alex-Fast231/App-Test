@@ -4688,7 +4688,10 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     document.querySelectorAll(".zeit-home-btn").forEach(el => {
       el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId: el.dataset.homeId });
     });
-    document.getElementById("zeitBackDashboardBtn").onclick = () => showDashboardView({ onLock });
+    document.getElementById("zeitBackDashboardBtn").onclick = () => {
+      setCurrentView("dashboard", {});
+      showDashboardView({ onLock });
+    };
     return;
   }
 
@@ -4729,7 +4732,10 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     document.querySelectorAll(".zeit-patient-btn").forEach(el => {
       el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId: el.dataset.patientId });
     });
-    document.getElementById("zeitBackHomeBtn").onclick = () => showZeiterfassungView({ onLock });
+    document.getElementById("zeitBackHomeBtn").onclick = () => {
+      setCurrentView("zeiterfassung", { selectedHomeId: null, selectedPatientId: null, selectedRezeptId: null });
+      showZeiterfassungView({ onLock });
+    };
     return;
   }
 
@@ -4753,7 +4759,10 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
           </div>
         </div>
       `);
-      document.getElementById("zeitBackPatientBtn").onclick = () => showZeiterfassungView({ onLock, selectedHomeId });
+      document.getElementById("zeitBackPatientBtn").onclick = () => {
+        setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId: null, selectedRezeptId: null });
+        showZeiterfassungView({ onLock, selectedHomeId });
+      };
       return;
     }
 
@@ -4790,7 +4799,10 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     document.querySelectorAll(".zeit-rezept-btn").forEach(el => {
       el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: el.dataset.rezeptId });
     });
-    document.getElementById("zeitBackPatientBtn").onclick = () => showZeiterfassungView({ onLock, selectedHomeId });
+    document.getElementById("zeitBackPatientBtn").onclick = () => {
+      setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId: null, selectedRezeptId: null });
+      showZeiterfassungView({ onLock, selectedHomeId });
+    };
     return;
   }
 
@@ -4827,8 +4839,10 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     </div>
   `);
 
-  document.getElementById("zeitBackRezeptBtn").onclick = () =>
+  document.getElementById("zeitBackRezeptBtn").onclick = () => {
+    setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId: null });
     showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
+  };
 
   if (autoMin > 0) {
     document.getElementById("zeitBuchenBtn").onclick = async () => {
