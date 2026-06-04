@@ -4829,11 +4829,11 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       </div>
 
       <label for="zeitNotizInput">Notiz (optional)</label>
-      <input id="zeitNotizInput" type="text" placeholder="z. B. Hausbesuch, Besonderheiten ...">
+      <input id="zeitNotizInput" type="text" placeholder="z. B. Hausbesuch, Besonderheiten ..." style="margin-bottom:0;">
 
-      <div class="row" style="margin-top:16px;">
-        <button id="zeitBuchenBtn"${autoMin === 0 ? ' disabled' : ''}>Zeit buchen</button>
-        <button id="zeitBackRezeptBtn" class="secondary">Zurück</button>
+      <div class="row" style="margin-top:16px; position:relative; z-index:10;">
+        <button id="zeitBuchenBtn" style="user-select:none; -webkit-user-select:none; margin-top:0;"${autoMin === 0 ? ' disabled' : ''}>Zeit buchen</button>
+        <button id="zeitBackRezeptBtn" class="secondary" style="user-select:none; -webkit-user-select:none; margin-top:0;">Zurück</button>
       </div>
       <div id="zeitBuchenMsg" class="muted" style="margin-top:10px;"></div>
     </div>
