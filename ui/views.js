@@ -4810,7 +4810,6 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   const rezept = aktiveRezepte.find(r => r.rezeptId === selectedRezeptId);
   if (!rezept) return showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
 
-  setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId });
   const autoMin = getAutomaticTreatmentMinutesForZeit(rezept);
 
   render(`
@@ -4828,8 +4827,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
         ${rezept.dt ? `<div class="compact-meta" style="margin-top:4px;">Doppelbehandlung berücksichtigt</div>` : ''}
       </div>
 
-      <label for="zeitNotizInput">Notiz (optional)</label>
-      <input id="zeitNotizInput" type="text" placeholder="z. B. Hausbesuch, Besonderheiten ..." style="margin-bottom:0;">
+      <input id="zeitNotizInput" type="text" placeholder="Notiz optional: z. B. Hausbesuch ...">
 
       <button id="zeitBuchenBtn"${autoMin === 0 ? ' disabled' : ''}>Zeit buchen</button>
       <button id="zeitBackRezeptBtn" class="secondary">Zurück</button>
@@ -4837,10 +4835,17 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     </div>
   `);
 
-  document.getElementById("zeitBackRezeptBtn").onclick = () => {
+  const backBtn = document.getElementById("zeitBackRezeptBtn");
+  backBtn.addEventListener("touchend", (e) => {
+    e.preventDefault();
     setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId: null });
     showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
-  };
+  });
+  backBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId: null });
+    showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId });
+  });
 
   if (autoMin > 0) {
     document.getElementById("zeitBuchenBtn").onclick = async () => {
