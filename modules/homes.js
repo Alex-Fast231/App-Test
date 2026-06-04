@@ -856,25 +856,6 @@ export function createRezeptEntry(homeId, patientId, rezeptId, payload) {
     const entryId = generateId("entry");
     let linkedTimeEntryId = "";
     const entryDate = normalizeDateString(payload.date);
-    const autoMinutes = getAutomaticTreatmentMinutes(rezept);
-    const alreadyCreditedToday = (rezept.timeEntries || []).some((item) => {
-      const itemDate = normalizeDateString(item?.date);
-      return item.type === "behandlung" && itemDate === entryDate;
-    });
-
-    if (autoMinutes > 0 && !alreadyCreditedToday) {
-      const timeEntry = createTimeEntryObject({
-        date: entryDate,
-        minutes: autoMinutes,
-        type: "behandlung",
-        note: "Automatisch aus Dokumentation",
-        sourceEntryId: entryId,
-        confirmed: true
-      });
-      rezept.timeEntries.push(timeEntry);
-      linkedTimeEntryId = timeEntry.timeEntryId;
-      rezept.zeitMeta.lastTimeEntryAt = timeEntry.createdAt;
-    }
 
     rezept.entries.push({
       entryId,
@@ -883,8 +864,8 @@ export function createRezeptEntry(homeId, patientId, rezeptId, payload) {
       text: (payload.text || "").trim(),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      linkedTimeEntryId,
-      autoTimeMinutes: autoMinutes
+      linkedTimeEntryId: "",
+      autoTimeMinutes: 0
     });
 
     appendTravelLogIfPossible(data, homeId, patientId, payload.date, entryId);

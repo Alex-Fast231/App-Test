@@ -480,24 +480,27 @@ function getDashboardTodayPatients(data, targetDate = formatCurrentDateShort()) 
   const rows = [];
   (data?.homes || []).forEach((home) => {
     (home?.patients || []).forEach((patient) => {
-      let hasDocumentationForDate = false;
       let totalMinutesForDate = 0;
+      let hasActivityForDate = false;
 
       (patient?.rezepte || []).forEach((rezept) => {
         (rezept?.entries || []).forEach((entry) => {
           if (String(entry?.date || '').trim() === normalizedDate) {
-            hasDocumentationForDate = true;
+            hasActivityForDate = true;
           }
         });
 
         getRezeptTimeEntries(rezept).forEach((entry) => {
           if (String(entry?.date || '').trim() !== normalizedDate) return;
           const minutes = Number(entry?.minutes || 0);
-          if (Number.isFinite(minutes)) totalMinutesForDate += minutes;
+          if (Number.isFinite(minutes)) {
+            totalMinutesForDate += minutes;
+            hasActivityForDate = true;
+          }
         });
       });
 
-      if (hasDocumentationForDate) {
+      if (hasActivityForDate) {
         rows.push({
           patientName: `${patient?.lastName || ""}, ${patient?.firstName || ""}`.replace(/^,\s*/, "").trim() || 'Ohne Namen',
           homeName: home?.name || '',
@@ -1792,17 +1795,30 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
         </div>
         <details class="accordion" style="margin-top:10px;">
           <summary>
-            <span>Patienten</span>
+            <span>Patienten heute</span>
+            <span class="muted">${dashboardTodayPatients.length} · ${escapeHtml(formatMinutesLabel(dashboardTodayPatients.reduce((s, r) => s + r.totalMinutes, 0)))}</span>
           </summary>
           <div class="accordion-body">
-            <div class="list-stack">
-              ${dashboardTodayPatients.length === 0 ? `<p class="muted">Heute noch keine Patienten dokumentiert.</p>` : dashboardTodayPatients.map((row) => `
-                <div class="compact-card" style="margin:0; padding:10px;">
-                  <div style="font-weight:600;">${escapeHtml(row.patientName)}</div>
-                  <div class="compact-meta">${escapeHtml(row.homeName || '—')}${row.totalMinutes > 0 ? `<br>${escapeHtml(formatMinutesLabel(row.totalMinutes))}` : ''}</div>
-                </div>
-              `).join("")}
-            </div>
+            ${dashboardTodayPatients.length === 0
+              ? `<p class="muted">Heute noch keine Zeit erfasst.</p>`
+              : `<div class="list-stack">
+                  ${dashboardTodayPatients.map((row) => `
+                    <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--border);">
+                      <div>
+                        <div style="font-weight:600; font-size:15px;">${escapeHtml(row.patientName)}</div>
+                        <div class="compact-meta">${escapeHtml(row.homeName || '—')}</div>
+                      </div>
+                      <div style="font-weight:700; color:var(--primary); font-size:15px; white-space:nowrap; margin-left:12px;">
+                        ${row.totalMinutes > 0 ? escapeHtml(formatMinutesLabel(row.totalMinutes)) : '—'}
+                      </div>
+                    </div>
+                  `).join("")}
+                  <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; margin-top:4px;">
+                    <div style="font-weight:700;">Gesamt</div>
+                    <div style="font-weight:700; color:var(--primary);">${escapeHtml(formatMinutesLabel(dashboardTodayPatients.reduce((s, r) => s + r.totalMinutes, 0)))}</div>
+                  </div>
+                </div>`
+            }
           </div>
         </details>
         <details class="accordion" style="margin-top:10px;">
@@ -2823,11 +2839,6 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
       msg.className = 'error';
       msg.textContent = '';
 
-      if (!text) {
-        msg.textContent = 'Bitte einen Dokumentationstext eingeben.';
-        return;
-      }
-
       let targetRezeptId = '';
       if (rezepte.length === 1) {
         targetRezeptId = rezepte[0].rezeptId;
@@ -3428,20 +3439,6 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId }) {
       ${rezept.abgegeben === true ? `<p class="muted">Dieses Rezept ist als abgegeben markiert und erscheint nicht mehr in der SchnellDoku.</p><button id="markRezeptAbgegebenBtn" class="secondary" disabled>Abgegeben ✓</button>` : `<p class="muted">Als abgegeben markierte Rezepte bleiben hier vollständig erhalten, verschwinden aber aus der SchnellDoku.</p><button id="markRezeptAbgegebenBtn" class="secondary">Rezept als abgegeben markieren</button>`}
     </div>
 
-    <div class="card">
-      <h3>Dokumentation zu diesem Rezept</h3>
-      <label for="entryDate">Datum</label>
-      <input id="entryDate" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
-
-      <label for="entryText">Dokumentation</label>
-      <input id="entryText" type="text" placeholder="Behandlung / Verlauf / Besonderheiten">
-
-      <p class="muted">Beim Speichern wird die Zeit automatisch aus der Rezeptleistung berechnet.</p>
-
-      <button id="saveEntryBtn">Dokumentation speichern</button>
-      <div id="entryMsg"></div>
-    </div>
-
     <details class="accordion">
       <summary>
         <span>Vorhandene Einträge</span>
@@ -3506,53 +3503,6 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId }) {
       }
     };
   }
-
-  bindDateAutoFormat(document.getElementById("entryDate"));
-
-  document.getElementById("saveEntryBtn").onclick = async () => {
-    const date = document.getElementById("entryDate").value.trim();
-    const text = document.getElementById("entryText").value.trim();
-    const msg = document.getElementById("entryMsg");
-
-    msg.className = "error";
-    msg.textContent = "";
-
-    if (!text) {
-      msg.textContent = "Bitte einen Dokumentationstext eingeben.";
-      return;
-    }
-
-    try {
-      const pendingKm = getPendingKilometerContext(homeId, patientId, date);
-      if (pendingKm.needsKmInput) {
-        const entered = window.prompt(`Bitte Entfernung eingeben:
-${pendingKm.fromLabel} → ${pendingKm.toLabel}`, "");
-        if (entered === null) {
-          msg.textContent = "Dokumentation abgebrochen, da die Kilometer nicht eingegeben wurden.";
-          return;
-        }
-        const kmValue = Number(String(entered).replace(",", "."));
-        if (!Number.isFinite(kmValue) || kmValue <= 0) {
-          msg.textContent = "Bitte gültige Kilometer für die neue Strecke eingeben.";
-          return;
-        }
-        saveKnownKilometerRoute({
-          fromPointId: pendingKm.fromPointId,
-          toPointId: pendingKm.toPointId,
-          fromLabel: pendingKm.fromLabel,
-          toLabel: pendingKm.toLabel,
-          km: kmValue
-        });
-      }
-
-      createRezeptEntry(homeId, patientId, rezeptId, { date, text });
-      await queuePersistRuntimeData();
-      showRezeptDetailView({ onLock, homeId, patientId, rezeptId });
-    } catch (err) {
-      console.error(err);
-      msg.textContent = err?.message || "Dokumentation konnte nicht gespeichert werden.";
-    }
-  };
 
   document.querySelectorAll(".editEntryBtn").forEach((btn) => {
     btn.onclick = () => {
