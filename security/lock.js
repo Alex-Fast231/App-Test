@@ -1,4 +1,5 @@
 export const AUTO_LOCK_MS = 5 * 60 * 1000;
+export const BACKGROUND_LOCK_MS = 2 * 60 * 1000;
 export const MAX_FAILED_ATTEMPTS = 5;
 export const LOCKOUT_MS = 5 * 60 * 1000;
 
@@ -71,41 +72,45 @@ export function registerSuccessfulUnlock(securityState, method = "pin", now = Da
 
 export function createAutoLockController(onLock) {
   let timer = null;
+  let backgroundTimer = null;
   let boundHandler = null;
-  let suspendCount = 0;
 
   function reset() {
-    if (suspendCount > 0) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       onLock();
     }, AUTO_LOCK_MS);
   }
 
+  function clearBackgroundTimer() {
+    if (backgroundTimer) clearTimeout(backgroundTimer);
+    backgroundTimer = null;
+  }
+
   function start() {
+    clearBackgroundTimer();
     reset();
   }
 
   function stop() {
     if (timer) clearTimeout(timer);
     timer = null;
+    clearBackgroundTimer();
   }
 
-  // Wird verwendet, wenn die App selbst ein Fenster öffnet (z.B. Drucken),
-  // das den Browser-Fokus übernimmt. Ohne das würde visibilitychange
-  // fälschlich einen Lock auslösen, sobald sich das Druckfenster öffnet.
-  function suspend() {
-    suspendCount += 1;
-    stop();
-  }
-
-  function resume() {
-    suspendCount = Math.max(0, suspendCount - 1);
-    if (suspendCount === 0) {
-      reset();
-    }
-  }
-
+  // Bewusst KEIN sofortiges Sperren bei Fokuswechsel mehr. Ein Fokuswechsel
+  // passiert auch, wenn die App selbst ein Fenster öffnet (z.B. Drucken/
+  // PDF-Vorschau über window.open). Auf Android können solche Fenster als
+  // eigener Tab/eigene Task laufen, wodurch ein sauberes "Fenster X gehört
+  // zur App" technisch nicht zuverlässig erkennbar ist.
+  //
+  // Stattdessen gilt: solange die App sichtbar ist, läuft der normale
+  // Inaktivitäts-Timer (AUTO_LOCK_MS, 5 Min). Wird die App unsichtbar
+  // (App-Wechsel, Bildschirm aus, Druckfenster), startet zusätzlich ein
+  // kürzerer Hintergrund-Timer (BACKGROUND_LOCK_MS, 2 Min). Kommt die App
+  // währenddessen zurück, wird dieser Hintergrund-Timer einfach verworfen -
+  // ein kurzer Ausflug zum Drucken sperrt also nicht, ein länger als 2
+  // Minuten dauernder App-Wechsel hingegen schon.
   function bindActivityEvents() {
     if (boundHandler) return;
     boundHandler = () => reset();
@@ -115,10 +120,13 @@ export function createAutoLockController(onLock) {
     });
 
     document.addEventListener("visibilitychange", () => {
-      if (suspendCount > 0) return;
       if (document.hidden) {
-        onLock();
+        clearBackgroundTimer();
+        backgroundTimer = setTimeout(() => {
+          onLock();
+        }, BACKGROUND_LOCK_MS);
       } else {
+        clearBackgroundTimer();
         reset();
       }
     });
@@ -138,8 +146,6 @@ export function createAutoLockController(onLock) {
     start,
     reset,
     stop,
-    suspend,
-    resume,
     bindActivityEvents,
     unbindActivityEvents
   };

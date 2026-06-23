@@ -1,6 +1,6 @@
 import { openDatabase } from "../storage/indexeddb.js";
 import { hasSecuritySetup, loadCryptoMeta, loadSecurityState } from "../storage/secure-store.js";
-import { setCryptoMeta, setSecurityState, registerAutoLockHandle } from "./app-core.js";
+import { setCryptoMeta, setSecurityState } from "./app-core.js";
 import { createAutoLockController } from "../security/lock.js";
 import {
   showSetupView,
@@ -57,7 +57,6 @@ function ensureAutoLock() {
   if (!autoLockController) {
     autoLockController = createAutoLockController(() => lockApp());
     autoLockController.bindActivityEvents();
-    registerAutoLockHandle(autoLockController);
   }
   autoLockController.start();
 }

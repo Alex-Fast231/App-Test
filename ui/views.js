@@ -14,9 +14,7 @@ import {
   getCurrentView,
   getCurrentContext,
   queuePersistRuntimeData,
-  mutateRuntimeData,
-  suspendAutoLock,
-  resumeAutoLock
+  mutateRuntimeData
 } from "../core/app-core.js";
 import { loadEncryptedAppData } from "../storage/secure-store.js";
 import { logSecurityEvent } from "../security/security-log.js";
@@ -451,24 +449,6 @@ function printTimeOverview() {
   const win = window.open('', '', 'width=1000,height=800');
   if (!win) return;
 
-  suspendAutoLock();
-
-  let resumed = false;
-  const resumeOnce = () => {
-    if (resumed) return;
-    resumed = true;
-    resumeAutoLock();
-  };
-
-  win.addEventListener("pagehide", resumeOnce);
-  win.addEventListener("unload", resumeOnce);
-  const closedCheckInterval = setInterval(() => {
-    if (win.closed) {
-      clearInterval(closedCheckInterval);
-      resumeOnce();
-    }
-  }, 500);
-
   win.document.write(`<!doctype html>
   <html>
     <head>
@@ -871,27 +851,6 @@ function openHtmlDocument(title, bodyHtml, { autoPrint = false } = {}) {
     alert("Fenster konnte nicht geöffnet werden.");
     return null;
   }
-
-  suspendAutoLock();
-
-  let resumed = false;
-  const resumeOnce = () => {
-    if (resumed) return;
-    resumed = true;
-    resumeAutoLock();
-  };
-
-  // Zuverlässige Erkennung, dass das Druckfenster wieder weg ist – egal ob
-  // über den "Schließen"-Button, win.close() nach dem Drucken, oder weil
-  // der Nutzer es manuell über das OS geschlossen hat.
-  win.addEventListener("pagehide", resumeOnce);
-  win.addEventListener("unload", resumeOnce);
-  const closedCheckInterval = setInterval(() => {
-    if (win.closed) {
-      clearInterval(closedCheckInterval);
-      resumeOnce();
-    }
-  }, 500);
 
   win.document.write(`
     <!DOCTYPE html>

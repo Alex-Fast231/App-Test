@@ -9,22 +9,6 @@ let securityState = null;
 let currentView = "boot";
 let currentContext = {};
 let persistPromise = null;
-let autoLockHandle = null;
-
-export function registerAutoLockHandle(handle) {
-  autoLockHandle = handle;
-}
-
-// Pausiert den Auto-Lock, während die App selbst ein Fenster öffnet, das
-// den Browser-Fokus übernimmt (z.B. Drucken). Ohne das würde der Wechsel
-// des Fensterfokus fälschlich als "App verlassen" gewertet und sperren.
-export function suspendAutoLock() {
-  autoLockHandle?.suspend?.();
-}
-
-export function resumeAutoLock() {
-  autoLockHandle?.resume?.();
-}
 
 export function setRuntimeSession(session) {
   runtimeKey = session.runtimeKey ?? null;
