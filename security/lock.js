@@ -72,8 +72,10 @@ export function registerSuccessfulUnlock(securityState, method = "pin", now = Da
 export function createAutoLockController(onLock) {
   let timer = null;
   let boundHandler = null;
+  let suspendCount = 0;
 
   function reset() {
+    if (suspendCount > 0) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       onLock();
@@ -89,6 +91,21 @@ export function createAutoLockController(onLock) {
     timer = null;
   }
 
+  // Wird verwendet, wenn die App selbst ein Fenster öffnet (z.B. Drucken),
+  // das den Browser-Fokus übernimmt. Ohne das würde visibilitychange
+  // fälschlich einen Lock auslösen, sobald sich das Druckfenster öffnet.
+  function suspend() {
+    suspendCount += 1;
+    stop();
+  }
+
+  function resume() {
+    suspendCount = Math.max(0, suspendCount - 1);
+    if (suspendCount === 0) {
+      reset();
+    }
+  }
+
   function bindActivityEvents() {
     if (boundHandler) return;
     boundHandler = () => reset();
@@ -98,6 +115,7 @@ export function createAutoLockController(onLock) {
     });
 
     document.addEventListener("visibilitychange", () => {
+      if (suspendCount > 0) return;
       if (document.hidden) {
         onLock();
       } else {
@@ -120,6 +138,8 @@ export function createAutoLockController(onLock) {
     start,
     reset,
     stop,
+    suspend,
+    resume,
     bindActivityEvents,
     unbindActivityEvents
   };

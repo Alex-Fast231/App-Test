@@ -9,6 +9,22 @@ let securityState = null;
 let currentView = "boot";
 let currentContext = {};
 let persistPromise = null;
+let autoLockHandle = null;
+
+export function registerAutoLockHandle(handle) {
+  autoLockHandle = handle;
+}
+
+// Pausiert den Auto-Lock, während die App selbst ein Fenster öffnet, das
+// den Browser-Fokus übernimmt (z.B. Drucken). Ohne das würde der Wechsel
+// des Fensterfokus fälschlich als "App verlassen" gewertet und sperren.
+export function suspendAutoLock() {
+  autoLockHandle?.suspend?.();
+}
+
+export function resumeAutoLock() {
+  autoLockHandle?.resume?.();
+}
 
 export function setRuntimeSession(session) {
   runtimeKey = session.runtimeKey ?? null;
@@ -75,10 +91,22 @@ export async function persistRuntimeData() {
     throw new Error("Runtime Session ist nicht entsperrt");
   }
 
+  // Der Schlüssel wird hier als Wert für encryptJSON übergeben, ist also
+  // auch dann noch korrekt, wenn runtimeKey währenddessen extern auf null
+  // gesetzt wird (z.B. durch einen Lock). Der Speichervorgang selbst ist
+  // damit sicher und wird nicht abgebrochen.
+  const keyForThisWrite = runtimeKey;
   const normalized = normalizeAppData(runtimeData);
-  const encrypted = await encryptJSON(normalized, runtimeKey);
+  const encrypted = await encryptJSON(normalized, keyForThisWrite);
   await saveEncryptedAppData(encrypted);
-  runtimeData = normalized;
+
+  // Nur dann den entschlüsselten Stand wieder im Speicher ablegen, wenn
+  // die Session währenddessen NICHT gesperrt wurde. Sonst würde ein Lock,
+  // der genau während dieses Speichervorgangs passiert, die entschlüsselten
+  // Daten direkt wieder zurück in den Speicher schreiben.
+  if (runtimeKey === keyForThisWrite) {
+    runtimeData = normalized;
+  }
 }
 
 export function queuePersistRuntimeData() {

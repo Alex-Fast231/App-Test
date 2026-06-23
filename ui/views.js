@@ -14,7 +14,9 @@ import {
   getCurrentView,
   getCurrentContext,
   queuePersistRuntimeData,
-  mutateRuntimeData
+  mutateRuntimeData,
+  suspendAutoLock,
+  resumeAutoLock
 } from "../core/app-core.js";
 import { loadEncryptedAppData } from "../storage/secure-store.js";
 import { logSecurityEvent } from "../security/security-log.js";
@@ -449,6 +451,24 @@ function printTimeOverview() {
   const win = window.open('', '', 'width=1000,height=800');
   if (!win) return;
 
+  suspendAutoLock();
+
+  let resumed = false;
+  const resumeOnce = () => {
+    if (resumed) return;
+    resumed = true;
+    resumeAutoLock();
+  };
+
+  win.addEventListener("pagehide", resumeOnce);
+  win.addEventListener("unload", resumeOnce);
+  const closedCheckInterval = setInterval(() => {
+    if (win.closed) {
+      clearInterval(closedCheckInterval);
+      resumeOnce();
+    }
+  }, 500);
+
   win.document.write(`<!doctype html>
   <html>
     <head>
@@ -851,6 +871,27 @@ function openHtmlDocument(title, bodyHtml, { autoPrint = false } = {}) {
     alert("Fenster konnte nicht geöffnet werden.");
     return null;
   }
+
+  suspendAutoLock();
+
+  let resumed = false;
+  const resumeOnce = () => {
+    if (resumed) return;
+    resumed = true;
+    resumeAutoLock();
+  };
+
+  // Zuverlässige Erkennung, dass das Druckfenster wieder weg ist – egal ob
+  // über den "Schließen"-Button, win.close() nach dem Drucken, oder weil
+  // der Nutzer es manuell über das OS geschlossen hat.
+  win.addEventListener("pagehide", resumeOnce);
+  win.addEventListener("unload", resumeOnce);
+  const closedCheckInterval = setInterval(() => {
+    if (win.closed) {
+      clearInterval(closedCheckInterval);
+      resumeOnce();
+    }
+  }, 500);
 
   win.document.write(`
     <!DOCTYPE html>
@@ -1445,6 +1486,16 @@ export function showLoginView({ onSuccess }) {
         msg.textContent = remaining > 0
           ? `PIN falsch. Sperre aktiv für ${Math.ceil(remaining / 1000)} Sekunden.`
           : "PIN ist falsch.";
+        return;
+      }
+
+      if (err.code === "STORAGE_ERROR") {
+        msg.textContent = "Technisches Problem: Sicherheits- oder App-Daten fehlen im Speicher. Dies liegt nicht an der PIN. Bitte App neu laden; falls das Problem bleibt, Backup wiederherstellen.";
+        return;
+      }
+
+      if (err.code === "DATA_CORRUPTED") {
+        msg.textContent = "PIN war korrekt, aber die App-Daten konnten nicht gelesen werden (möglicherweise beschädigt). Bitte App neu laden; falls das Problem bleibt, Backup wiederherstellen.";
         return;
       }
 

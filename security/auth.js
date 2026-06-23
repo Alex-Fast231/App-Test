@@ -51,13 +51,44 @@ export async function unlockWithPIN({ pin, cryptoMeta, encryptedAppData, securit
     throw err;
   }
 
+  // Technische Voraussetzungen prüfen, BEVOR der PIN-Versuch gezählt wird.
+  // Fehlt cryptoMeta oder encryptedAppData (z.B. durch einen Storage-Fehler),
+  // ist das kein falscher PIN-Versuch und darf den Nutzer nicht aussperren.
+  if (!cryptoMeta || !cryptoMeta.wrappedDataKeyByPIN || !cryptoMeta.pinSaltBase64) {
+    const err = new Error("STORAGE_ERROR");
+    err.code = "STORAGE_ERROR";
+    err.message = "Sicherheitsdaten (cryptoMeta) fehlen oder sind unvollständig.";
+    throw err;
+  }
+
+  if (!encryptedAppData || !encryptedAppData.cipherBase64 || !encryptedAppData.ivBase64) {
+    const err = new Error("STORAGE_ERROR");
+    err.code = "STORAGE_ERROR";
+    err.message = "Verschlüsselte App-Daten fehlen oder sind unvollständig.";
+    throw err;
+  }
+
+  let dataKey;
   try {
-    const dataKey = await unwrapDataKeyWithPIN(
+    dataKey = await unwrapDataKeyWithPIN(
       cryptoMeta.wrappedDataKeyByPIN,
       pin,
       fromBase64(cryptoMeta.pinSaltBase64)
     );
+  } catch {
+    // Hier ist es tatsächlich (mit sehr hoher Wahrscheinlichkeit) ein
+    // falscher PIN: Schlüssel-Unwrap mit AES-GCM scheitert authentifiziert,
+    // wenn der abgeleitete Schlüssel nicht passt.
+    const nextSecurityState = registerFailedLogin(securityState);
+    await saveSecurityState(nextSecurityState);
 
+    const err = new Error("INVALID_PIN");
+    err.code = "INVALID_PIN";
+    err.securityState = nextSecurityState;
+    throw err;
+  }
+
+  try {
     const data = await decryptJSON(encryptedAppData, dataKey);
     const runtimeData = normalizeAppData(data);
     const nextSecurityState = registerSuccessfulUnlock(securityState, "pin");
@@ -69,13 +100,15 @@ export async function unlockWithPIN({ pin, cryptoMeta, encryptedAppData, securit
       runtimeData,
       securityState: nextSecurityState
     };
-  } catch {
-    const nextSecurityState = registerFailedLogin(securityState);
-    await saveSecurityState(nextSecurityState);
-
-    const err = new Error("INVALID_PIN");
-    err.code = "INVALID_PIN";
-    err.securityState = nextSecurityState;
+  } catch (decryptErr) {
+    // PIN war korrekt (der Schlüssel ließ sich entschlüsseln), aber die
+    // eigentlichen App-Daten lassen sich nicht entschlüsseln/parsen. Das
+    // ist ein Daten- bzw. Storage-Problem, kein falscher PIN-Versuch -
+    // der Fehlversuchszähler bleibt daher unverändert.
+    console.error("Entschlüsselung der App-Daten fehlgeschlagen:", decryptErr);
+    const err = new Error("DATA_CORRUPTED");
+    err.code = "DATA_CORRUPTED";
+    err.securityState = securityState;
     throw err;
   }
 }
