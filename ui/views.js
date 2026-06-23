@@ -1453,7 +1453,44 @@ export function showLoginView({ onSuccess }) {
   };
 }
 
-function renderDashboardHeaderCard({ therapistName }) {
+const BACKUP_WARNING_DAYS = 14;
+
+function getBackupWarning(lastBackupAt) {
+  if (!lastBackupAt) {
+    return {
+      level: "error",
+      text: "⚠️ Noch kein Backup erstellt. Bitte jetzt unter Einstellungen ein Backup exportieren."
+    };
+  }
+
+  const lastBackupDate = new Date(lastBackupAt);
+  if (Number.isNaN(lastBackupDate.getTime())) {
+    return null;
+  }
+
+  const daysSince = Math.floor((Date.now() - lastBackupDate.getTime()) / (1000 * 60 * 60 * 24));
+
+  if (daysSince >= BACKUP_WARNING_DAYS) {
+    return {
+      level: "error",
+      text: `⚠️ Letztes Backup vor ${daysSince} Tagen. Bitte zeitnah ein neues Backup exportieren.`
+    };
+  }
+
+  if (daysSince >= 7) {
+    return {
+      level: "warning",
+      text: `Letztes Backup vor ${daysSince} Tagen.`
+    };
+  }
+
+  return null;
+}
+
+function renderDashboardHeaderCard({ therapistName, lastBackupAt = "" }) {
+  const backupWarning = getBackupWarning(lastBackupAt);
+  const warningColor = backupWarning?.level === "error" ? "#b91c1c" : "#92400e";
+
   return `
     <div class="card">
       <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
@@ -1464,6 +1501,7 @@ function renderDashboardHeaderCard({ therapistName }) {
         </div>
         <button id="openSettingsBtn" class="secondary" title="Einstellungen bearbeiten" aria-label="Einstellungen bearbeiten" style="width:auto; margin-top:0; padding:10px 12px; min-width:48px; font-size:20px; line-height:1;">⚙️</button>
       </div>
+      ${backupWarning ? `<p style="color:${warningColor}; font-weight:600; margin-top:10px; margin-bottom:0;">${escapeHtml(backupWarning.text)}</p>` : ""}
     </div>
   `;
 }
@@ -1594,7 +1632,7 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
   const dokuOverviewRows = getDocumentationOverviewRows(runtimeData, dokuOverviewDate);
 
   render(`
-    ${renderDashboardHeaderCard({ therapistName })}
+    ${renderDashboardHeaderCard({ therapistName, lastBackupAt })}
 
     <details class="accordion" ${showTimeOverview || hasTimeSummaryFilter || showAbsenceForm || showHolidayForm || showAbgleichForm || showDokuOverview || dokuOverviewDate ? 'open' : ''}>
       <summary>
@@ -1714,16 +1752,23 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
             ${buildTimeOverviewPrintMarkup({ therapistName, summary: timePeriodSummary })}
           </div>
 
-          <div class="compact-card" style="margin-top:12px; padding:12px;">
-            <div style="font-size:18px; font-weight:700; margin-bottom:6px;">Zeitsaldo</div>
-            <div class="compact-meta">Startdatum: ${escapeHtml(timePeriodSummary.fastStartDatum || '—')}</div>
-            <div class="compact-meta">Startsaldo vor App/FaSt: ${escapeHtml(getSignedMinutesLabel(timePeriodSummary.stundenStartsaldoMinuten))}</div>
-            <div class="compact-meta">Seit Start erfasst: ${escapeHtml(formatHoursClockLabel(Math.abs(timePeriodSummary.appSaldoMinutes)))} ${timePeriodSummary.appSaldoMinutes > 0 ? 'Plus' : timePeriodSummary.appSaldoMinutes < 0 ? 'Minus' : 'Ausgeglichen'}</div>
-            <div class="compact-meta">Abgeglichen: -${escapeHtml(formatHoursClockLabel(timePeriodSummary.stundenAbgleichMinuten || 0))}</div>
-            <div class="compact-meta">Gesamt: ${escapeHtml(formatHoursClockLabel(Math.abs(timePeriodSummary.saldoMinutes)))} ${timePeriodSummary.saldoMinutes > 0 ? 'Plus' : timePeriodSummary.saldoMinutes < 0 ? 'Minus' : 'Ausgeglichen'}</div>
-            <div class="compact-meta">Geleistete Zeit: ${escapeHtml(formatHoursClockLabel(timePeriodSummary.totalMinutes))}</div>
-            <div class="compact-meta">Sollzeit: ${escapeHtml(formatHoursClockLabel(timePeriodSummary.plannedMinutes))}</div>
-            <div class="compact-meta">Zeitraum: ${escapeHtml(timePeriodSummary.fromDate || '—')} bis ${escapeHtml(timePeriodSummary.toDate || '—')}</div>
+          <div class="compact-card" style="margin-top:12px; padding:16px;">
+            <div style="font-size:18px; font-weight:700; margin-bottom:12px;">Zeitsaldo</div>
+
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
+              <div class="compact-meta">Geleistet</div>
+              <div style="font-weight:700; font-size:15px;">${escapeHtml(formatHoursClockLabel(timePeriodSummary.totalMinutes))}</div>
+            </div>
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
+              <div class="compact-meta">Soll</div>
+              <div style="font-weight:700; font-size:15px;">${escapeHtml(formatHoursClockLabel(timePeriodSummary.plannedMinutes))}</div>
+            </div>
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0 4px 0;">
+              <div style="font-weight:700;">Saldo</div>
+              <div style="font-weight:700; font-size:17px; color:${timePeriodSummary.saldoMinutes >= 0 ? 'var(--primary)' : 'var(--danger)'};">
+                ${timePeriodSummary.saldoMinutes >= 0 ? '+' : ''}${escapeHtml(getSignedMinutesLabel(timePeriodSummary.saldoMinutes))}
+              </div>
+            </div>
           </div>
 
           <details class="accordion" style="margin-top:12px;">

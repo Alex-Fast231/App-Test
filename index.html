@@ -345,17 +345,29 @@
 <body>
   <header>
     <div class="brand">FaSt-Doku</div>
-    <div class="header-actions">
+    <div class="header-actions" style="display:flex; gap:8px;">
+      <button id="updateAvailableBtn" class="secondary" style="display:none; background:#166534;">⬇️ Update</button>
       <button id="lockBtn" class="secondary" style="display:none;">Sperren</button>
     </div>
   </header>
 
   <main id="app"></main>
 
-  <script>
+  <script type="module">
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js").catch(err => {
-        console.error("Service Worker Fehler:", err);
+      import("./core/update.js").then(({ initServiceWorkerUpdates, onUpdateAvailable, applyUpdate }) => {
+        initServiceWorkerUpdates();
+
+        const updateBtn = document.getElementById("updateAvailableBtn");
+        onUpdateAvailable(() => {
+          updateBtn.style.display = "inline-block";
+        });
+
+        updateBtn.onclick = () => {
+          updateBtn.disabled = true;
+          updateBtn.textContent = "Wird aktualisiert…";
+          applyUpdate();
+        };
       });
     }
   </script>

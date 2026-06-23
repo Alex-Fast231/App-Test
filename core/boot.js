@@ -12,6 +12,28 @@ import {
 
 let autoLockController = null;
 
+async function ensurePersistentStorage() {
+  try {
+    if (!navigator.storage || typeof navigator.storage.persist !== "function") {
+      return { supported: false, persisted: false };
+    }
+
+    const alreadyPersisted = typeof navigator.storage.persisted === "function"
+      ? await navigator.storage.persisted()
+      : false;
+
+    if (alreadyPersisted) {
+      return { supported: true, persisted: true };
+    }
+
+    const granted = await navigator.storage.persist();
+    return { supported: true, persisted: granted };
+  } catch (err) {
+    console.error("Persistent Storage Anfrage fehlgeschlagen:", err);
+    return { supported: true, persisted: false, error: err };
+  }
+}
+
 async function determineStartupState() {
   const setupExists = await hasSecuritySetup();
   return setupExists ? "login" : "setup";
@@ -45,6 +67,15 @@ function handleUnlocked() {
 }
 
 async function bootstrapApp() {
+  const persistResult = await ensurePersistentStorage();
+  if (persistResult.supported && !persistResult.persisted) {
+    console.warn(
+      "Persistenter Speicher wurde vom Browser nicht gewährt. " +
+      "Die App-Daten könnten bei Speicherdruck vom System gelöscht werden. " +
+      "Regelmäßige Backups werden dringend empfohlen."
+    );
+  }
+
   await openDatabase();
 
   const startupState = await determineStartupState();
