@@ -262,7 +262,11 @@ function collectAllTimeEntries(data) {
             rezeptLabel: rezeptSummary(rezept),
             type: entry?.type || '',
             note: entry?.note || '',
-            createdAt: entry?.createdAt || ''
+            createdAt: entry?.createdAt || '',
+            homeId: home?.homeId || '',
+            patientId: patient?.patientId || '',
+            rezeptId: rezept?.rezeptId || '',
+            timeEntryId: entry?.timeEntryId || ''
           });
         });
       });
@@ -290,8 +294,11 @@ function getTimePeriodSummary(data, fromDate, toDate) {
     .filter((entry) => isDateInRange(entry.date, effectiveFromDate, toDate));
 
   const totalsByDate = new Map();
+  const entriesByDate = new Map();
   rows.forEach((entry) => {
     totalsByDate.set(entry.date, (totalsByDate.get(entry.date) || 0) + entry.minutes);
+    if (!entriesByDate.has(entry.date)) entriesByDate.set(entry.date, []);
+    entriesByDate.get(entry.date).push(entry);
   });
 
   const periodDates = listComparableDatesInRange(effectiveFromDate, toDate);
@@ -315,7 +322,9 @@ function getTimePeriodSummary(data, fromDate, toDate) {
       saldoMinutes,
       isWorkDay,
       absenceType: absence?.type || '',
-      isHoliday: Boolean(specialDay)
+      isHoliday: Boolean(specialDay),
+      entries: (entriesByDate.get(date) || [])
+        .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || ''), 'de'))
     };
   }).filter((row) => row.totalMinutes > 0 || row.plannedMinutes > 0 || row.absenceType || row.isHoliday);
 
@@ -1842,6 +1851,29 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
                     <div class="compact-meta">Soll: ${escapeHtml(formatHoursClockLabel(row.plannedMinutes))}</div>
                     <div class="compact-meta">Saldo: ${escapeHtml(formatHoursClockLabel(Math.abs(row.saldoMinutes)))} ${row.saldoMinutes > 0 ? 'Plus' : row.saldoMinutes < 0 ? 'Minus' : 'Ausgeglichen'}</div>
                     ${row.absenceType ? `<div class="compact-meta">${escapeHtml(row.absenceType === 'krank' ? 'Krank' : 'Urlaub')} · neutral</div>` : row.isHoliday ? `<div class="compact-meta">Feiertag · neutral</div>` : row.isWorkDay ? `<div class="compact-meta">Arbeitstag</div>` : ''}
+                    ${row.entries && row.entries.length > 0 ? `
+                      <details style="margin-top:8px;">
+                        <summary style="cursor:pointer; color:var(--primary); font-size:13px;">${row.entries.length} Einzeleintrag${row.entries.length === 1 ? '' : 'e'} anzeigen</summary>
+                        <div style="margin-top:8px; display:flex; flex-direction:column; gap:8px;">
+                          ${row.entries.map((entry) => `
+                            <div style="border:1px solid var(--border); border-radius:8px; padding:8px;">
+                              <div style="font-weight:600; font-size:13px;">${escapeHtml(entry.patientName || '—')}</div>
+                              <div class="compact-meta">${escapeHtml(entry.rezeptLabel || '—')} · ${escapeHtml(entry.homeName || '—')}</div>
+                              <div class="compact-meta">${escapeHtml(formatMinutesLabel(entry.minutes))} · ${escapeHtml(getTimeTypeLabel(entry.type))}</div>
+                              ${entry.note ? `<div class="compact-meta">${escapeHtml(entry.note)}</div>` : ''}
+                              <button
+                                class="delete-dashboard-time-entry-btn danger"
+                                style="margin-top:6px; width:100%; padding:6px;"
+                                data-home-id="${escapeHtml(entry.homeId)}"
+                                data-patient-id="${escapeHtml(entry.patientId)}"
+                                data-rezept-id="${escapeHtml(entry.rezeptId)}"
+                                data-time-entry-id="${escapeHtml(entry.timeEntryId)}"
+                              >Eintrag löschen</button>
+                            </div>
+                          `).join('')}
+                        </div>
+                      </details>
+                    ` : ''}
                   </div>
                 `).join("")}
               </div>
@@ -2273,6 +2305,28 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
       });
       await queuePersistRuntimeData();
       showDashboardView({ onLock, timeSummaryFrom: document.getElementById("dashboardTimeSummaryFrom").value.trim(), timeSummaryTo: document.getElementById("dashboardTimeSummaryTo").value.trim(), showTimeOverview: true, showHolidayForm: false });
+    };
+  });
+
+  document.querySelectorAll('.delete-dashboard-time-entry-btn').forEach((button) => {
+    button.onclick = async () => {
+      const { homeId: entryHomeId, patientId: entryPatientId, rezeptId: entryRezeptId, timeEntryId: entryTimeEntryId } = button.dataset;
+      if (!entryHomeId || !entryPatientId || !entryRezeptId || !entryTimeEntryId) return;
+      if (!confirm('Diesen Zeiteintrag wirklich löschen? Dies wirkt sich auf den Zeitsaldo aus.')) return;
+
+      try {
+        deleteRezeptTimeEntry(entryHomeId, entryPatientId, entryRezeptId, entryTimeEntryId);
+        await queuePersistRuntimeData();
+        showDashboardView({
+          onLock,
+          timeSummaryFrom: document.getElementById("dashboardTimeSummaryFrom").value.trim(),
+          timeSummaryTo: document.getElementById("dashboardTimeSummaryTo").value.trim(),
+          showTimeOverview: true
+        });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || 'Zeiteintrag konnte nicht gelöscht werden.');
+      }
     };
   });
 
