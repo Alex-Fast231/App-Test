@@ -679,6 +679,49 @@ export function getPatientById(home, patientId) {
   return (home?.patients || []).find((patient) => patient.patientId === patientId) || null;
 }
 
+export function deletePatient(homeId, patientId) {
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    if (!home) throw new Error("Heim nicht gefunden");
+
+    const patient = getPatientById(home, patientId);
+    if (!patient) throw new Error("Patient nicht gefunden");
+
+    const entryIds = new Set();
+    (patient.rezepte || []).forEach((rezept) => {
+      (rezept.entries || []).forEach((entry) => {
+        const id = String(entry?.entryId || "").trim();
+        if (id) entryIds.add(id);
+      });
+    });
+
+    ensureKilometerState(data);
+    data.kilometer.travelLog = (data.kilometer.travelLog || []).filter((item) => {
+      const relatedEntryId = String(item?.relatedEntryId || "").trim();
+      const fromPointId = String(item?.fromPointId || "").trim();
+      const toPointId = String(item?.toPointId || "").trim();
+
+      if (relatedEntryId && entryIds.has(relatedEntryId)) return false;
+      if ([fromPointId, toPointId].some((pointId) => pointId === `hb:${patientId}`)) return false;
+      return true;
+    });
+
+    data.kilometer.knownRoutes = (data.kilometer.knownRoutes || []).filter((route) => {
+      const fromPointId = String(route?.fromPointId || "").trim();
+      const toPointId = String(route?.toPointId || "").trim();
+      if ([fromPointId, toPointId].some((pointId) => pointId === `hb:${patientId}`)) return false;
+      return true;
+    });
+
+    const beforeLength = (home.patients || []).length;
+    home.patients = (home.patients || []).filter((item) => item.patientId !== patientId);
+
+    if (home.patients.length === beforeLength) {
+      throw new Error("Patient nicht gefunden");
+    }
+  });
+}
+
 export function createRezept(homeId, patientId, payload) {
   mutateRuntimeData((data) => {
     const home = getHomeById(data, homeId);

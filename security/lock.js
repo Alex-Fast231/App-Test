@@ -72,8 +72,8 @@ export function registerSuccessfulUnlock(securityState, method = "pin", now = Da
 
 export function createAutoLockController(onLock) {
   let timer = null;
-  let backgroundTimer = null;
   let boundHandler = null;
+  let hiddenAt = null;
 
   function reset() {
     if (timer) clearTimeout(timer);
@@ -82,35 +82,24 @@ export function createAutoLockController(onLock) {
     }, AUTO_LOCK_MS);
   }
 
-  function clearBackgroundTimer() {
-    if (backgroundTimer) clearTimeout(backgroundTimer);
-    backgroundTimer = null;
-  }
-
   function start() {
-    clearBackgroundTimer();
+    hiddenAt = null;
     reset();
   }
 
   function stop() {
     if (timer) clearTimeout(timer);
     timer = null;
-    clearBackgroundTimer();
   }
 
-  // Bewusst KEIN sofortiges Sperren bei Fokuswechsel mehr. Ein Fokuswechsel
-  // passiert auch, wenn die App selbst ein Fenster öffnet (z.B. Drucken/
-  // PDF-Vorschau über window.open). Auf Android können solche Fenster als
-  // eigener Tab/eigene Task laufen, wodurch ein sauberes "Fenster X gehört
-  // zur App" technisch nicht zuverlässig erkennbar ist.
-  //
-  // Stattdessen gilt: solange die App sichtbar ist, läuft der normale
-  // Inaktivitäts-Timer (AUTO_LOCK_MS, 5 Min). Wird die App unsichtbar
-  // (App-Wechsel, Bildschirm aus, Druckfenster), startet zusätzlich ein
-  // kürzerer Hintergrund-Timer (BACKGROUND_LOCK_MS, 2 Min). Kommt die App
-  // währenddessen zurück, wird dieser Hintergrund-Timer einfach verworfen -
-  // ein kurzer Ausflug zum Drucken sperrt also nicht, ein länger als 2
-  // Minuten dauernder App-Wechsel hingegen schon.
+  // WICHTIG: setTimeout allein ist hier nicht zuverlässig. Sobald die App
+  // (besonders als installierte PWA auf Android) in den Hintergrund geht
+  // oder minimiert wird, kann das Betriebssystem den JavaScript-Hauptthread
+  // komplett pausieren/einfrieren - ein laufender Timer feuert dann erst
+  // (verspätet) beim Zurückkehren, oder gar nicht. Deswegen wird zusätzlich
+  // beim Verstecken ein Zeitstempel gespeichert; beim Zurückkehren wird die
+  // TATSÄCHLICH verstrichene Zeit nachträglich geprüft (Date.now() läuft
+  // immer korrekt weiter, unabhängig davon ob Timer pausiert waren).
   function bindActivityEvents() {
     if (boundHandler) return;
     boundHandler = () => reset();
@@ -121,12 +110,18 @@ export function createAutoLockController(onLock) {
 
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
-        clearBackgroundTimer();
-        backgroundTimer = setTimeout(() => {
-          onLock();
-        }, BACKGROUND_LOCK_MS);
+        hiddenAt = Date.now();
+        // Timer bleibt zusätzlich gesetzt für den Fall, dass er doch feuert
+        // (z.B. wenn die Seite nur kurz inaktiv, aber nicht eingefroren war).
       } else {
-        clearBackgroundTimer();
+        if (hiddenAt !== null) {
+          const elapsed = Date.now() - hiddenAt;
+          hiddenAt = null;
+          if (elapsed >= BACKGROUND_LOCK_MS) {
+            onLock();
+            return;
+          }
+        }
         reset();
       }
     });
