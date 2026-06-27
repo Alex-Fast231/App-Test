@@ -828,6 +828,21 @@ export function markRezeptAbgegeben(homeId, patientId, rezeptId) {
   });
 }
 
+export function unmarkRezeptAbgegeben(homeId, patientId, rezeptId) {
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    if (!home) throw new Error("Heim nicht gefunden");
+
+    const patient = getPatientById(home, patientId);
+    if (!patient) throw new Error("Patient nicht gefunden");
+
+    const rezept = getRezeptById(patient, rezeptId);
+    if (!rezept) throw new Error("Rezept nicht gefunden");
+
+    rezept.abgegeben = false;
+  });
+}
+
 export function deleteRezept(homeId, patientId, rezeptId) {
   mutateRuntimeData((data) => {
     const home = getHomeById(data, homeId);

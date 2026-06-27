@@ -28,6 +28,7 @@ import {
   createRezept,
   updateRezept,
   markRezeptAbgegeben,
+  unmarkRezeptAbgegeben,
   deleteRezept,
   createRezeptEntry,
   updateRezeptEntry,
@@ -2832,6 +2833,8 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
 
                   <button class="savePatientDataBtn" data-patient-id="${patient.patientId}">Stammdaten speichern</button>
                   <div id="patient-edit-msg-${patient.patientId}"></div>
+
+                  <button class="deletePatientInlineBtn danger" data-patient-id="${patient.patientId}" style="margin-top:16px; width:100%;">Patient löschen</button>
                 </div>
               </div>
             </details>
@@ -3080,6 +3083,25 @@ ${pendingKm.fromLabel} → ${pendingKm.toLabel}`, "");
       } catch (err) {
         console.error(err);
         msg.textContent = 'Stammdaten konnten nicht gespeichert werden.';
+      }
+    };
+  });
+
+  document.querySelectorAll('.deletePatientInlineBtn').forEach((btn) => {
+    btn.onclick = async () => {
+      const patientId = btn.dataset.patientId;
+      const patient = (home.patients || []).find((p) => p.patientId === patientId);
+      const patientLabel = patient ? `${patient.firstName} ${patient.lastName}`.trim() || "Patient" : "Patient";
+      const ok = confirm(`${patientLabel} wirklich löschen? Alle Rezepte und Dokumentationen dieses Patienten werden ebenfalls gelöscht.`);
+      if (!ok) return;
+
+      try {
+        deletePatient(homeId, patientId);
+        await queuePersistRuntimeData();
+        showHomeDetailView({ onLock, homeId, searchText });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || "Patient konnte nicht gelöscht werden.");
       }
     };
   });
@@ -3604,7 +3626,7 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId }) {
 
     <div class="card">
       <h3>Rezeptstatus</h3>
-      ${rezept.abgegeben === true ? `<p class="muted">Dieses Rezept ist als abgegeben markiert und erscheint nicht mehr in der SchnellDoku.</p><button id="markRezeptAbgegebenBtn" class="secondary" disabled>Abgegeben ✓</button>` : `<p class="muted">Als abgegeben markierte Rezepte bleiben hier vollständig erhalten, verschwinden aber aus der SchnellDoku.</p><button id="markRezeptAbgegebenBtn" class="secondary">Rezept als abgegeben markieren</button>`}
+      ${rezept.abgegeben === true ? `<p class="muted">Dieses Rezept ist als abgegeben markiert und erscheint nicht mehr in der SchnellDoku.</p><button id="markRezeptAbgegebenBtn" class="secondary">Abgegeben ✓ — zurücksetzen</button>` : `<p class="muted">Als abgegeben markierte Rezepte bleiben hier vollständig erhalten, verschwinden aber aus der SchnellDoku.</p><button id="markRezeptAbgegebenBtn" class="secondary">Rezept als abgegeben markieren</button>`}
     </div>
 
     <details class="accordion">
@@ -3656,18 +3678,27 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId }) {
   };
 
   const markRezeptAbgegebenBtn = document.getElementById("markRezeptAbgegebenBtn");
-  if (markRezeptAbgegebenBtn && rezept.abgegeben !== true) {
+  if (markRezeptAbgegebenBtn) {
     markRezeptAbgegebenBtn.onclick = async () => {
-      const ok = window.confirm("Dieses Rezept als abgegeben markieren?\n\nEs verschwindet danach aus der SchnellDoku, bleibt aber in der großen Doku erhalten.");
+      const isCurrentlyAbgegeben = rezept.abgegeben === true;
+      const ok = window.confirm(
+        isCurrentlyAbgegeben
+          ? "Markierung 'abgegeben' wirklich zurücksetzen?\n\nDas Rezept erscheint danach wieder in der SchnellDoku."
+          : "Dieses Rezept als abgegeben markieren?\n\nEs verschwindet danach aus der SchnellDoku, bleibt aber in der großen Doku erhalten."
+      );
       if (!ok) return;
 
       try {
-        markRezeptAbgegeben(homeId, patientId, rezeptId);
+        if (isCurrentlyAbgegeben) {
+          unmarkRezeptAbgegeben(homeId, patientId, rezeptId);
+        } else {
+          markRezeptAbgegeben(homeId, patientId, rezeptId);
+        }
         await queuePersistRuntimeData();
         showRezeptDetailView({ onLock, homeId, patientId, rezeptId });
       } catch (err) {
         console.error(err);
-        alert(err?.message || "Rezept konnte nicht als abgegeben markiert werden.");
+        alert(err?.message || "Rezeptstatus konnte nicht geändert werden.");
       }
     };
   }
