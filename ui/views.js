@@ -3270,7 +3270,7 @@ export function showPatientDetailView({ onLock, homeId, patientId }) {
           return `
             <details class="accordion">
               <summary>
-                <span>${escapeHtml(rezeptSummary(rezept))} · Ausgestellt: ${escapeHtml(rezept.ausstell || '—')}</span>
+                <span>${escapeHtml(rezeptSummary(rezept))} · ${escapeHtml(rezept.ausstell || '—')}</span>
                 <span class="muted">${escapeHtml(formatMinutesLabel(getRezeptTimeSummary(rezept).totalMinutes))}</span>
               </summary>
               <div class="accordion-body">
@@ -3306,7 +3306,7 @@ export function showPatientDetailView({ onLock, homeId, patientId }) {
             return `
               <details class="accordion">
                 <summary>
-                  <span>${escapeHtml(rezeptSummary(rezept))} · Ausgestellt: ${escapeHtml(rezept.ausstell || '—')}</span>
+                  <span>${escapeHtml(rezeptSummary(rezept))} · ${escapeHtml(rezept.ausstell || '—')}</span>
                   <span class="muted">Abgegeben</span>
                 </summary>
                 <div class="accordion-body">

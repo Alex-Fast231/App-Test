@@ -231,10 +231,21 @@
   display:flex;
   justify-content:space-between;
   align-items:center;
+  gap:10px;
   background:#E2E6EC;
   color:#2A2F36;
   font-weight:600;
   transition:background .2s ease;
+}
+
+.accordion summary > span:first-child{
+  flex:1 1 auto;
+  min-width:0;
+}
+
+.accordion summary > span:last-child{
+  flex:0 0 auto;
+  white-space:nowrap;
 }
 
 .accordion summary:hover{

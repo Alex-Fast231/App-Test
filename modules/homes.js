@@ -991,7 +991,7 @@ export function rezeptSummary(rezept) {
   });
 
   let suffix = "";
-  if (rezept?.dt) suffix += " · Doppeltermin";
+  if (rezept?.dt) suffix += " · DT";
   if (rezept?.bg) suffix += " · BG";
 
   return `${parts.join(", ") || "Keine Leistung"}${suffix}`;
