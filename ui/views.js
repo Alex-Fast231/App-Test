@@ -4821,10 +4821,10 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
             : homes.map(home => {
                 const aktivePatients = (home.patients || []).filter(p => !isPatientDeceased(p));
                 return `
-                  <button class="zeit-home-btn secondary" data-home-id="${escapeHtml(home.homeId || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
+                  <div class="compact-card selectable-card zeit-home-btn" data-home-id="${escapeHtml(home.homeId || '')}">
                     <div style="font-weight:700; font-size:16px;">${escapeHtml(home.name || '—')}</div>
                     <div class="compact-meta">${aktivePatients.length} Patient(en)</div>
-                  </button>`;
+                  </div>`;
               }).join('')
           }
         </div>
@@ -4865,10 +4865,10 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
             : aktivePatients.map(patient => {
                 const aktiveRezepte = (patient.rezepte || []).filter(r => !r.abgegeben);
                 return `
-                  <button class="zeit-patient-btn secondary" data-patient-id="${escapeHtml(patient.patientId || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
+                  <div class="compact-card selectable-card zeit-patient-btn" data-patient-id="${escapeHtml(patient.patientId || '')}">
                     <div style="font-weight:700; font-size:16px;">${escapeHtml(`${patient.lastName || ''}, ${patient.firstName || ''}`.replace(/^,\s*/, '').trim() || '—')}</div>
                     <div class="compact-meta">${aktiveRezepte.length} aktive${aktiveRezepte.length === 1 ? 's' : ''} Rezept${aktiveRezepte.length !== 1 ? 'e' : ''}</div>
-                  </button>`;
+                  </div>`;
               }).join('')
           }
         </div>
@@ -4932,11 +4932,11 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
           ${aktiveRezepte.map(rezept => {
             const autoMin = getAutomaticTreatmentMinutesForZeit(rezept);
             return `
-              <button class="zeit-rezept-btn secondary" data-rezept-id="${escapeHtml(rezept.rezeptId || '')}" style="width:100%; text-align:left; padding:14px; margin-top:0;">
+              <div class="compact-card selectable-card zeit-rezept-btn" data-rezept-id="${escapeHtml(rezept.rezeptId || '')}">
                 <div style="font-weight:700; font-size:15px;">${escapeHtml(rezeptSummary(rezept))}</div>
                 <div class="compact-meta">Ausgestellt: ${escapeHtml(rezept.ausstell || '—')}</div>
                 <div class="compact-meta" style="color:var(--primary); font-weight:600;">${autoMin > 0 ? `${autoMin} Minuten` : 'Zeit nicht erkannt'}</div>
-              </button>`;
+              </div>`;
           }).join('')}
         </div>
         <div class="row" style="margin-top:16px;">
