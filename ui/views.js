@@ -1825,6 +1825,7 @@ export function showDashboardView({ onLock } = {}) {
             <span class="muted">${dashboardTodayPatients.length} · ${escapeHtml(formatMinutesLabel(dashboardTodayPatients.reduce((s, r) => s + r.totalMinutes, 0)))}</span>
           </summary>
           <div class="accordion-body">
+            <p id="deleteBtnDiagnose" style="font-size:11px; color:#999; margin:0 0 8px 0;"></p>
             ${dashboardTodayPatients.length === 0
               ? `<p class="muted">Heute noch keine Zeit erfasst.</p>`
               : `<div class="list-stack">
@@ -1953,10 +1954,18 @@ export function showDashboardView({ onLock } = {}) {
   document.getElementById("openZeitraumAuswertungFromOverviewBtn").onclick = () => showZeitraumAuswertungView({ onLock });
   document.getElementById("openStundenkontoFromOverviewBtn").onclick = () => showStundenkontoView({ onLock });
 
-  document.querySelectorAll('.delete-dashboard-time-entry-btn').forEach((button) => {
+  const dashboardDeleteTimeBtns = document.querySelectorAll('.delete-dashboard-time-entry-btn');
+  const deleteBtnDiagnoseEl = document.getElementById("deleteBtnDiagnose");
+  if (deleteBtnDiagnoseEl) {
+    deleteBtnDiagnoseEl.textContent = `[Diagnose] ${dashboardDeleteTimeBtns.length} Löschen-Button(s) gefunden`;
+  }
+  dashboardDeleteTimeBtns.forEach((button) => {
     button.onclick = async () => {
       const { homeId, patientId, rezeptId, timeEntryId } = button.dataset;
-      if (!homeId || !patientId || !rezeptId || !timeEntryId) return;
+      if (!homeId || !patientId || !rezeptId || !timeEntryId) {
+        alert(`Löschen abgebrochen: fehlende ID.\nhomeId="${homeId}"\npatientId="${patientId}"\nrezeptId="${rezeptId}"\ntimeEntryId="${timeEntryId}"`);
+        return;
+      }
       if (!confirm('Diesen Zeiteintrag wirklich löschen?')) return;
 
       try {

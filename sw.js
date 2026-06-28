@@ -1,6 +1,6 @@
 // Bei jeder inhaltlichen Änderung der App diese Versionsnummer erhöhen.
 // Das ist der einzige verlässliche Trigger, damit Chrome ein Update erkennt.
-const SW_VERSION = "v3.17.0";
+const SW_VERSION = "v3.18.0";
 const CACHE_NAME = `fast-doku-shell-${SW_VERSION}`;
 
 const FILES = [
