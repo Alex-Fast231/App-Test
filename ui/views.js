@@ -76,6 +76,7 @@ import {
   compareDeDates,
   isDateInRange,
   parseComparableDate,
+  getComparableFromDate,
   listComparableDatesInRange
 } from "../core/date-utils.js";
 
@@ -204,6 +205,72 @@ function getWorkDayCodeFromComparable(comparableDate) {
   if (!date) return '';
   const dayMap = ['SO', 'MO', 'DI', 'MI', 'DO', 'FR', 'SA'];
   return dayMap[date.getDay()] || '';
+}
+
+// --- Kalender für die Zeitraum-Auswertung (Etappe A) ---
+
+function buildCalendarMonthGrid(year, month) {
+  // month: 1-12. Woche beginnt mit Montag.
+  const firstOfMonth = new Date(year, month - 1, 1, 12, 0, 0, 0);
+  const lastOfMonth = new Date(year, month, 0, 12, 0, 0, 0);
+  const daysInMonth = lastOfMonth.getDate();
+  const firstWeekday = (firstOfMonth.getDay() + 6) % 7; // 0=Montag...6=Sonntag
+
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let day = 1; day <= daysInMonth; day++) {
+    cells.push(getComparableFromDate(new Date(year, month - 1, day, 12, 0, 0, 0)));
+  }
+  while (cells.length % 7 !== 0) cells.push(null);
+  return cells;
+}
+
+function getMonthLabelDe(year, month) {
+  const monthNames = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+  return `${monthNames[month - 1]} ${year}`;
+}
+
+function shiftMonth(year, month, delta) {
+  const total = (year * 12 + (month - 1)) + delta;
+  return { year: Math.floor(total / 12), month: (total % 12) + 1 };
+}
+
+function getQuickRangeDates(key) {
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+  const todayComparable = getComparableFromDate(today);
+
+  function startOfWeek(date) {
+    const d = new Date(date.getTime());
+    const weekday = (d.getDay() + 6) % 7; // 0=Montag
+    d.setDate(d.getDate() - weekday);
+    return d;
+  }
+
+  if (key === 'thisWeek') {
+    const start = startOfWeek(today);
+    const end = new Date(start.getTime());
+    end.setDate(end.getDate() + 6);
+    return { from: getComparableFromDate(start), to: getComparableFromDate(end) };
+  }
+  if (key === 'lastWeek') {
+    const start = startOfWeek(today);
+    start.setDate(start.getDate() - 7);
+    const end = new Date(start.getTime());
+    end.setDate(end.getDate() + 6);
+    return { from: getComparableFromDate(start), to: getComparableFromDate(end) };
+  }
+  if (key === 'thisMonth') {
+    const start = new Date(today.getFullYear(), today.getMonth(), 1, 12, 0, 0, 0);
+    const end = new Date(today.getFullYear(), today.getMonth() + 1, 0, 12, 0, 0, 0);
+    return { from: getComparableFromDate(start), to: getComparableFromDate(end) };
+  }
+  if (key === 'lastMonth') {
+    const start = new Date(today.getFullYear(), today.getMonth() - 1, 1, 12, 0, 0, 0);
+    const end = new Date(today.getFullYear(), today.getMonth(), 0, 12, 0, 0, 0);
+    return { from: getComparableFromDate(start), to: getComparableFromDate(end) };
+  }
+  return { from: todayComparable, to: todayComparable };
 }
 
 function getDailyPlannedMinutes(settings) {
@@ -516,6 +583,46 @@ function getDashboardTodayPatients(data, targetDate = formatCurrentDateShort()) 
     });
   });
   return rows.sort((a,b)=>collatorDE.compare(a.patientName,b.patientName));
+}
+
+// Wie getDashboardTodayPatients, aber für einen frei wählbaren Zeitraum
+// statt eines einzelnen Tages. Eigenständige Funktion (Etappe A der
+// Zeitraum-Auswertung), um die bereits getestete Tagesansicht ("Patienten
+// heute") nicht zu beeinflussen.
+function getPatientsInDateRange(data, fromDate, toDate) {
+  const rows = [];
+  (data?.homes || []).forEach((home) => {
+    (home?.patients || []).forEach((patient) => {
+      const patientName = `${patient?.lastName || ""}, ${patient?.firstName || ""}`.replace(/^,\s*/, "").trim() || 'Ohne Namen';
+
+      (patient?.rezepte || []).forEach((rezept) => {
+        getRezeptTimeEntries(rezept).forEach((entry) => {
+          if (!isDateInRange(entry?.date, fromDate, toDate)) return;
+          const minutes = Number(entry?.minutes || 0);
+          if (!Number.isFinite(minutes)) return;
+
+          rows.push({
+            date: String(entry?.date || '').trim(),
+            patientName,
+            homeName: home?.name || '',
+            rezeptLabel: rezeptSummary(rezept),
+            totalMinutes: minutes,
+            type: entry?.type || '',
+            note: entry?.note || '',
+            homeId: home?.homeId || '',
+            patientId: patient?.patientId || '',
+            rezeptId: rezept?.rezeptId || '',
+            timeEntryId: entry?.timeEntryId || ''
+          });
+        });
+      });
+    });
+  });
+  return rows.sort((a, b) => {
+    const dateCompare = compareDeDates(a.date, b.date);
+    if (dateCompare !== 0) return dateCompare;
+    return collatorDE.compare(a.patientName, b.patientName);
+  });
 }
 
 function getDocumentationOverviewRows(data, targetDate = "") {
@@ -1949,14 +2056,17 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
       <h3>Bereiche</h3>
       <div class="row">
         <button id="openZeiterfassungBtn">⏱ Zeiterfassung</button>
+        <button id="openZeitraumAuswertungBtn" class="secondary">📅 Zeitraum-Auswertung</button>
+      </div>
+      <div class="row">
         <button id="openHomesBtn" class="secondary">Einrichtungen</button>
-      </div>
-      <div class="row">
         <button id="openAbgabeBtn" class="secondary">Abgabeliste</button>
-        <button id="openNachbestellBtn" class="secondary">Nachbestellung</button>
       </div>
       <div class="row">
+        <button id="openNachbestellBtn" class="secondary">Nachbestellung</button>
         <button id="openKilometerBtn" class="secondary">Kilometer</button>
+      </div>
+      <div class="row">
         <button id="lockNowBtn" class="secondary">Jetzt sperren</button>
       </div>
     </div>
@@ -1992,6 +2102,7 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
 
   document.getElementById("openSettingsBtn").onclick = () => showSettingsView({ onLock });
   document.getElementById("openZeiterfassungBtn").onclick = () => showZeiterfassungView({ onLock });
+  document.getElementById("openZeitraumAuswertungBtn").onclick = () => showZeitraumAuswertungView({ onLock });
   document.getElementById("openHomesBtn").onclick = () => showHomesView({ onLock });
   document.getElementById("openAbgabeBtn").onclick = () => showAbgabeView({ onLock });
   document.getElementById("openNachbestellBtn").onclick = () => showNachbestellungView({ onLock });
@@ -4801,7 +4912,222 @@ function escapeHtml(value) {
 // ZEITERFASSUNG – Phase 2
 // ─────────────────────────────────────────────
 
-export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedPatientId = null, selectedRezeptId = null, successMsg = "" } = {}) {
+export function showZeitraumAuswertungView({
+  onLock,
+  calYear = null,
+  calMonth = null,
+  rangeStart = "",
+  rangeEnd = "",
+  pendingStart = ""
+} = {}) {
+  bindLockButton(onLock);
+  setCurrentView("zeitraum-auswertung", { calYear, calMonth, rangeStart, rangeEnd, pendingStart });
+
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+  const year = calYear || today.getFullYear();
+  const month = calMonth || (today.getMonth() + 1);
+  const todayComparable = getComparableFromDate(today);
+
+  const grid = buildCalendarMonthGrid(year, month);
+  const weekDayLabels = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+
+  const runtimeData = getRuntimeData();
+  const hasRange = Boolean(rangeStart && rangeEnd);
+  const fromDe = rangeStart ? formatDeDate(rangeStart) : '';
+  const toDe = rangeEnd ? formatDeDate(rangeEnd) : '';
+
+  const patientsInRange = hasRange ? getPatientsInDateRange(runtimeData, fromDe, toDe) : [];
+  const totalMinutesInRange = patientsInRange.reduce((sum, row) => sum + row.totalMinutes, 0);
+
+  // Tagesgruppen für die Anzeige, falls mehrere Tage im Zeitraum liegen
+  const groupedByDate = new Map();
+  patientsInRange.forEach((row) => {
+    if (!groupedByDate.has(row.date)) groupedByDate.set(row.date, []);
+    groupedByDate.get(row.date).push(row);
+  });
+  const sortedDates = Array.from(groupedByDate.keys()).sort((a, b) => compareDeDates(a, b));
+
+  render(`
+    <div class="card">
+      <h2>Zeitraum-Auswertung</h2>
+      <button id="zeitraumBackDashboardBtn" class="secondary">Zurück zum Dashboard</button>
+    </div>
+
+    <div class="card">
+      <div class="row" style="margin-top:0;">
+        <button id="quickThisWeekBtn" class="secondary" style="margin-top:0;">Diese Woche</button>
+        <button id="quickLastWeekBtn" class="secondary" style="margin-top:0;">Letzte Woche</button>
+      </div>
+      <div class="row">
+        <button id="quickThisMonthBtn" class="secondary" style="margin-top:0;">Dieser Monat</button>
+        <button id="quickLastMonthBtn" class="secondary" style="margin-top:0;">Letzter Monat</button>
+      </div>
+
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-top:18px;">
+        <button id="calPrevMonthBtn" class="secondary" style="width:auto; margin-top:0; padding:8px 14px;">‹</button>
+        <div style="font-weight:700; font-size:16px;">${escapeHtml(getMonthLabelDe(year, month))}</div>
+        <button id="calNextMonthBtn" class="secondary" style="width:auto; margin-top:0; padding:8px 14px;">›</button>
+      </div>
+
+      <div style="display:grid; grid-template-columns:repeat(7, 1fr); gap:4px; margin-top:12px; text-align:center;">
+        ${weekDayLabels.map(label => `<div class="compact-meta" style="font-weight:600;">${label}</div>`).join('')}
+        ${grid.map(cellDate => {
+          if (!cellDate) return `<div></div>`;
+          const dayNum = Number(cellDate.slice(-2));
+          const isToday = cellDate === todayComparable;
+          const isStart = cellDate === rangeStart;
+          const isEnd = cellDate === rangeEnd;
+          const isPending = cellDate === pendingStart;
+          const isInRange = hasRange && cellDate > rangeStart && cellDate < rangeEnd;
+
+          let bg = 'transparent';
+          let color = 'var(--text)';
+          let fontWeight = '500';
+          if (isStart || isEnd || isPending) { bg = 'var(--primary)'; color = '#fff'; fontWeight = '700'; }
+          else if (isInRange) { bg = 'rgba(37,99,235,.12)'; }
+          else if (isToday) { bg = 'rgba(37,99,235,.08)'; fontWeight = '700'; }
+
+          return `<button class="cal-day-btn" data-date="${cellDate}" style="margin-top:0; padding:10px 0; border-radius:8px; background:${bg}; color:${color}; font-weight:${fontWeight}; font-size:14px;">${dayNum}</button>`;
+        }).join('')}
+      </div>
+
+      <p class="muted" style="margin-top:14px; margin-bottom:0;">
+        ${pendingStart && !hasRange
+          ? `Start: ${escapeHtml(formatDeDate(pendingStart))} — jetzt Endtag antippen.`
+          : hasRange
+            ? `Zeitraum: ${escapeHtml(fromDe)} – ${escapeHtml(toDe)}`
+            : 'Tippe einen Tag an, oder zwei Tage für einen Zeitraum.'
+        }
+      </p>
+      ${hasRange ? `<button id="clearRangeBtn" class="secondary" style="margin-top:10px;">Auswahl zurücksetzen</button>` : ''}
+    </div>
+
+    ${hasRange ? `
+      <div class="card">
+        <h3>Gesamtzeit</h3>
+        <div style="font-weight:700; font-size:20px; color:var(--primary);">${escapeHtml(formatHoursClockLabel(totalMinutesInRange))}</div>
+        <div class="compact-meta">${escapeHtml(fromDe)} – ${escapeHtml(toDe)}</div>
+      </div>
+
+      <div class="card">
+        <h3>Behandelte Patienten</h3>
+        ${patientsInRange.length === 0
+          ? `<p class="muted">Keine Zeiteinträge im gewählten Zeitraum.</p>`
+          : sortedDates.map(date => `
+              <details class="accordion">
+                <summary>
+                  <span>${escapeHtml(date)}</span>
+                  <span class="muted">${escapeHtml(formatMinutesLabel(groupedByDate.get(date).reduce((s, r) => s + r.totalMinutes, 0)))}</span>
+                </summary>
+                <div class="accordion-body">
+                  <div class="list-stack">
+                    ${groupedByDate.get(date).map(row => `
+                      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid var(--border);">
+                        <div style="min-width:0;">
+                          <div style="font-weight:600; font-size:15px;">${escapeHtml(row.patientName)}</div>
+                          <div class="compact-meta">${escapeHtml(row.rezeptLabel || '—')}</div>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:10px; flex-shrink:0;">
+                          <div style="font-weight:700; color:var(--primary); font-size:15px; white-space:nowrap;">${escapeHtml(formatMinutesLabel(row.totalMinutes))}</div>
+                          <button
+                            class="delete-zeitraum-entry-btn danger"
+                            style="padding:6px 10px; font-size:13px; white-space:nowrap;"
+                            data-home-id="${escapeHtml(row.homeId)}"
+                            data-patient-id="${escapeHtml(row.patientId)}"
+                            data-rezept-id="${escapeHtml(row.rezeptId)}"
+                            data-time-entry-id="${escapeHtml(row.timeEntryId)}"
+                          >Löschen</button>
+                        </div>
+                      </div>
+                    `).join('')}
+                  </div>
+                </div>
+              </details>
+            `).join('')
+        }
+      </div>
+    ` : ''}
+  `);
+
+  document.getElementById("zeitraumBackDashboardBtn").onclick = () => {
+    setCurrentView("dashboard", {});
+    showDashboardView({ onLock });
+  };
+
+  document.getElementById("calPrevMonthBtn").onclick = () => {
+    const prev = shiftMonth(year, month, -1);
+    showZeitraumAuswertungView({ onLock, calYear: prev.year, calMonth: prev.month, rangeStart, rangeEnd, pendingStart });
+  };
+  document.getElementById("calNextMonthBtn").onclick = () => {
+    const next = shiftMonth(year, month, 1);
+    showZeitraumAuswertungView({ onLock, calYear: next.year, calMonth: next.month, rangeStart, rangeEnd, pendingStart });
+  };
+
+  document.querySelectorAll(".cal-day-btn").forEach((btn) => {
+    btn.onclick = () => {
+      const clickedDate = btn.dataset.date;
+
+      if (!pendingStart) {
+        // Erster Klick: Start setzen, noch kein fertiger Bereich
+        showZeitraumAuswertungView({ onLock, calYear: year, calMonth: month, rangeStart: "", rangeEnd: "", pendingStart: clickedDate });
+        return;
+      }
+
+      // Zweiter Klick: Bereich fertigstellen (unabhängig von der Klick-Reihenfolge)
+      const start = clickedDate < pendingStart ? clickedDate : pendingStart;
+      const end = clickedDate < pendingStart ? pendingStart : clickedDate;
+      showZeitraumAuswertungView({ onLock, calYear: year, calMonth: month, rangeStart: start, rangeEnd: end, pendingStart: "" });
+    };
+  });
+
+  const clearBtn = document.getElementById("clearRangeBtn");
+  if (clearBtn) {
+    clearBtn.onclick = () => {
+      showZeitraumAuswertungView({ onLock, calYear: year, calMonth: month, rangeStart: "", rangeEnd: "", pendingStart: "" });
+    };
+  }
+
+  document.getElementById("quickThisWeekBtn").onclick = () => {
+    const range = getQuickRangeDates('thisWeek');
+    const refDate = parseComparableDate(range.from);
+    showZeitraumAuswertungView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "" });
+  };
+  document.getElementById("quickLastWeekBtn").onclick = () => {
+    const range = getQuickRangeDates('lastWeek');
+    const refDate = parseComparableDate(range.from);
+    showZeitraumAuswertungView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "" });
+  };
+  document.getElementById("quickThisMonthBtn").onclick = () => {
+    const range = getQuickRangeDates('thisMonth');
+    const refDate = parseComparableDate(range.from);
+    showZeitraumAuswertungView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "" });
+  };
+  document.getElementById("quickLastMonthBtn").onclick = () => {
+    const range = getQuickRangeDates('lastMonth');
+    const refDate = parseComparableDate(range.from);
+    showZeitraumAuswertungView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "" });
+  };
+
+  document.querySelectorAll(".delete-zeitraum-entry-btn").forEach((btn) => {
+    btn.onclick = async () => {
+      const { homeId, patientId, rezeptId, timeEntryId } = btn.dataset;
+      if (!homeId || !patientId || !rezeptId || !timeEntryId) return;
+      if (!confirm("Diesen Zeiteintrag wirklich löschen?")) return;
+
+      try {
+        deleteRezeptTimeEntry(homeId, patientId, rezeptId, timeEntryId);
+        await queuePersistRuntimeData();
+        showZeitraumAuswertungView({ onLock, calYear: year, calMonth: month, rangeStart, rangeEnd, pendingStart });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || "Zeiteintrag konnte nicht gelöscht werden.");
+      }
+    };
+  });
+}
+
+
   bindLockButton(onLock);
 
   const runtimeData = getRuntimeData();
