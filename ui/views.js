@@ -5127,7 +5127,7 @@ export function showZeitraumAuswertungView({
   });
 }
 
-
+export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedPatientId = null, selectedRezeptId = null, successMsg = "" } = {}) {
   bindLockButton(onLock);
 
   const runtimeData = getRuntimeData();
