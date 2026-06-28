@@ -1736,7 +1736,7 @@ export function showSettingsView({ onLock }) {
   };
 }
 
-export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo = "", showTimeOverview = false, showAbsenceForm = "", showHolidayForm = false, showAbgleichForm = false, showDokuOverview = false, dokuOverviewDate = "" } = {}) {
+export function showDashboardView({ onLock } = {}) {
   bindLockButton(onLock);
   setCurrentView("dashboard");
 
@@ -1746,18 +1746,12 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
   const lastBackupAt = runtimeData?.ui?.lastBackupAt || "";
   const todayDate = formatCurrentDateShort();
   const totalTrackedMinutes = getTotalTrackedMinutes(runtimeData, todayDate);
-  const timePeriodSummary = getTimePeriodSummary(runtimeData, timeSummaryFrom, timeSummaryTo);
-  const hasTimeSummaryFilter = Boolean(String(timeSummaryFrom || '').trim() || String(timeSummaryTo || '').trim());
   const dashboardTodayPatients = getDashboardTodayPatients(runtimeData, todayDate);
-  const absenceRows = timePeriodSummary.absenceRows;
-  const specialDayRows = timePeriodSummary.specialDayRows;
-  const stundenAbgleichRows = timePeriodSummary.stundenAbgleichRows || [];
-  const dokuOverviewRows = getDocumentationOverviewRows(runtimeData, dokuOverviewDate);
 
   render(`
     ${renderDashboardHeaderCard({ therapistName, lastBackupAt })}
 
-    <details class="accordion" ${showTimeOverview || hasTimeSummaryFilter || showAbsenceForm || showHolidayForm || showAbgleichForm || showDokuOverview || dokuOverviewDate ? 'open' : ''}>
+    <details class="accordion">
       <summary>
         <span>Überblick</span>
         <span class="muted">Stunden</span>
@@ -1769,220 +1763,8 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
           <div class="compact-meta" style="margin-top:6px;">Aktuelle Zeit · Heute</div>
         </div>
         <div class="row" style="margin-top:10px;">
-          <button id="toggleDashboardTimeOverviewBtn" class="secondary">Zeitübersicht</button>
-        </div>
-        <div id="dashboardTimeOverviewPanel" class="compact-card" style="margin-top:10px; display:${showTimeOverview || hasTimeSummaryFilter || showAbgleichForm || showDokuOverview || dokuOverviewDate ? 'block' : 'none'};">
-          <div style="font-weight:700; margin-bottom:10px;">Zeitübersicht</div>
-          <label for="dashboardTimeSummaryFrom">Von</label>
-          <input id="dashboardTimeSummaryFrom" type="text" value="${escapeHtml(timeSummaryFrom)}" placeholder="TT.MM.JJJJ" inputmode="numeric">
-
-          <label for="dashboardTimeSummaryTo">Bis</label>
-          <input id="dashboardTimeSummaryTo" type="text" value="${escapeHtml(timeSummaryTo)}" placeholder="TT.MM.JJJJ" inputmode="numeric">
-
-          <div style="display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:12px; margin-top:16px;">
-            <button id="openUrlaubBtn" class="secondary" style="margin-top:0;">Urlaub</button>
-            <button id="openKrankBtn" class="secondary" style="margin-top:0;">Krank</button>
-            <button id="openHolidayBtn" class="secondary" style="margin-top:0;">Feiertage</button>
-          </div>
-          <div style="display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin-top:12px;">
-            <button id="openAbgleichBtn" class="secondary" style="margin-top:0;">Stundenabgleich</button>
-            <button id="runDashboardTimeSummaryBtn" style="margin-top:0;">Auswertung anzeigen</button>
-          </div>
-          <div style="display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin-top:12px;">
-            <button id="openDokuOverviewBtn" class="secondary" style="margin-top:0;">Doku-Übersicht</button>
-            <button id="printTimeOverviewBtn" class="secondary" style="margin-top:0;">Drucken</button>
-          </div>
-
-          <div id="dashboardDokuOverviewPanel" class="compact-card" style="margin:12px 0 0 0; padding:10px; display:${showDokuOverview || dokuOverviewDate ? 'block' : 'none'};">
-            <div style="font-weight:600; margin-bottom:10px;">Doku-Übersicht nach Datum</div>
-            <label for="dashboardDokuOverviewDate">Datum</label>
-            <input id="dashboardDokuOverviewDate" type="text" value="${escapeHtml(dokuOverviewDate)}" placeholder="TT.MM.JJJJ" inputmode="numeric">
-            <div class="row">
-              <button id="runDokuOverviewBtn">Anzeigen</button>
-              <button id="clearDokuOverviewBtn" class="secondary">Leeren</button>
-            </div>
-            <div id="dashboardDokuOverviewMsg"></div>
-            <div class="list-stack" style="margin-top:12px;">
-              ${!dokuOverviewDate ? `<p class="muted" style="margin:0;">Bitte Datum auswählen.</p>` : dokuOverviewRows.length === 0 ? `<p class="muted" style="margin:0;">Keine Dokumentationen für dieses Datum gefunden.</p>` : dokuOverviewRows.map((row) => `
-                <div class="compact-card" style="margin:0; padding:12px;">
-                  <div style="font-weight:700; font-size:16px; margin-bottom:4px;">${escapeHtml(row.patientName)}</div>
-                  <div class="compact-meta" style="margin-bottom:8px;">${escapeHtml(row.homeName || '—')}</div>
-                  <div class="list-stack">
-                    ${row.entries.map((entry) => `
-                      <div class="compact-card" style="margin:0; padding:10px;">
-                        <div class="compact-meta" style="margin-bottom:4px;">${escapeHtml(entry.rezeptLabel || 'Rezept')}</div>
-                        <div>${escapeHtml(entry.text || '—')}</div>
-                      </div>
-                    `).join('')}
-                  </div>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-
-          <div id="dashboardAbsenceFormPanel" class="compact-card" style="margin:12px 0 0 0; padding:10px; display:${showAbsenceForm ? 'block' : 'none'};">
-            <div style="font-weight:600; margin-bottom:10px;">${showAbsenceForm === 'krank' ? 'Krank eintragen' : 'Urlaub eintragen'}</div>
-            <label for="dashboardAbsenceFrom">Von</label>
-            <input id="dashboardAbsenceFrom" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
-
-            <label for="dashboardAbsenceTo">Bis</label>
-            <input id="dashboardAbsenceTo" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
-
-            <div class="row">
-              <button id="saveDashboardAbsenceBtn">Speichern</button>
-              <button id="cancelDashboardAbsenceBtn" class="secondary">Abbrechen</button>
-            </div>
-            <div id="dashboardAbsenceMsg"></div>
-          </div>
-
-          <div id="dashboardHolidayFormPanel" class="compact-card" style="margin:12px 0 0 0; padding:10px; display:${showHolidayForm ? 'block' : 'none'};">
-            <div style="font-weight:600; margin-bottom:10px;">Feiertag eintragen</div>
-            <label for="dashboardHolidayDate">Datum</label>
-            <input id="dashboardHolidayDate" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
-
-            <div class="row">
-              <button id="saveDashboardHolidayBtn">Speichern</button>
-              <button id="cancelDashboardHolidayBtn" class="secondary">Abbrechen</button>
-            </div>
-            <div id="dashboardHolidayMsg"></div>
-          </div>
-
-          <div id="dashboardAbgleichFormPanel" class="compact-card" style="margin:12px 0 0 0; padding:10px; display:${showAbgleichForm ? 'block' : 'none'};">
-            <div style="font-weight:600; margin-bottom:10px;">Stunden abgleichen</div>
-            <label for="dashboardAbgleichTyp">Art</label>
-            <select id="dashboardAbgleichTyp">
-              <option value="auszahlung">Auszahlung</option>
-              <option value="frei">Überstundenfrei</option>
-            </select>
-
-            <label for="dashboardAbgleichDatum">Datum</label>
-            <input id="dashboardAbgleichDatum" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
-
-            <label for="dashboardAbgleichStunden">Stunden</label>
-            <input id="dashboardAbgleichStunden" type="text" inputmode="numeric" placeholder="z. B. 30:00">
-
-            <label for="dashboardAbgleichNotiz">Notiz</label>
-            <input id="dashboardAbgleichNotiz" type="text" placeholder="optional">
-
-            <div class="row">
-              <button id="saveDashboardAbgleichBtn">Abgleich speichern</button>
-              <button id="cancelDashboardAbgleichBtn" class="secondary">Abbrechen</button>
-            </div>
-            <div id="dashboardAbgleichMsg"></div>
-          </div>
-
-          <div id="zeituebersicht-content" style="display:none;">
-            ${buildTimeOverviewPrintMarkup({ therapistName, summary: timePeriodSummary })}
-          </div>
-
-          <div class="compact-card" style="margin-top:12px; padding:16px;">
-            <div style="font-size:18px; font-weight:700; margin-bottom:12px;">Zeitsaldo</div>
-
-            <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
-              <div class="compact-meta">Geleistet</div>
-              <div style="font-weight:700; font-size:15px;">${escapeHtml(formatHoursClockLabel(timePeriodSummary.totalMinutes))}</div>
-            </div>
-            <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
-              <div class="compact-meta">Soll</div>
-              <div style="font-weight:700; font-size:15px;">${escapeHtml(formatHoursClockLabel(timePeriodSummary.plannedMinutes))}</div>
-            </div>
-            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0 4px 0;">
-              <div style="font-weight:700;">Saldo</div>
-              <div style="font-weight:700; font-size:17px; color:${timePeriodSummary.saldoMinutes >= 0 ? 'var(--primary)' : 'var(--danger)'};">
-                ${timePeriodSummary.saldoMinutes >= 0 ? '+' : ''}${escapeHtml(getSignedMinutesLabel(timePeriodSummary.saldoMinutes))}
-              </div>
-            </div>
-          </div>
-
-          <details class="accordion" style="margin-top:12px;">
-            <summary>
-              <span>Stundenabgleiche</span>
-              <span class="muted">${escapeHtml(String(stundenAbgleichRows.length))}</span>
-            </summary>
-            <div class="accordion-body">
-              <div class="list-stack">
-                ${stundenAbgleichRows.length === 0 ? `<p class="muted" style="margin:0;">Keine Abgleiche im gewählten Zeitraum.</p>` : ''}
-                ${stundenAbgleichRows.map((item) => `
-                  <div class="compact-card" style="margin:0; padding:12px;">
-                    <div style="font-weight:700; font-size:16px; margin-bottom:4px;">${escapeHtml(getStundenAbgleichTypLabel(item.typ))}</div>
-                    <div class="compact-meta">${escapeHtml(item.datum || '—')} · -${escapeHtml(formatHoursClockLabel(item.minuten || 0))}</div>
-                    ${item.notiz ? `<div class="compact-meta">${escapeHtml(item.notiz)}</div>` : ''}
-                    <button class="delete-stunden-abgleich-btn secondary" data-abgleich-id="${escapeHtml(item.id || '')}" style="margin-top:12px; width:100%;">Löschen</button>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-          </details>
-
-          <details class="accordion" style="margin-top:12px;">
-            <summary>
-              <span>Urlaub / Krank / Feiertage</span>
-              <span class="muted">${escapeHtml(String(absenceRows.length + specialDayRows.length))}</span>
-            </summary>
-            <div class="accordion-body">
-              <div class="list-stack">
-                ${absenceRows.length === 0 && specialDayRows.length === 0 ? `<p class="muted" style="margin:0;">Keine Einträge im gewählten Zeitraum.</p>` : ''}
-                ${absenceRows.map((item) => `
-                  <div class="compact-card" style="margin:0; padding:12px;">
-                    <div style="font-weight:700; font-size:16px; margin-bottom:4px;">${escapeHtml(item.type === 'krank' ? 'Krank' : 'Urlaub')}</div>
-                    <div class="compact-meta">${escapeHtml(item.from || '—')} bis ${escapeHtml(item.to || '—')}</div>
-                    <button class="delete-absence-btn secondary" data-absence-id="${escapeHtml(item.id || '')}" style="margin-top:12px; width:100%;">Löschen</button>
-                  </div>
-                `).join('')}
-                ${specialDayRows.map((item) => `
-                  <div class="compact-card" style="margin:0; padding:12px;">
-                    <div style="font-weight:700; font-size:16px; margin-bottom:4px;">Feiertag</div>
-                    <div class="compact-meta">${escapeHtml(item.date || '—')}</div>
-                    <button class="delete-special-day-btn secondary" data-special-day-id="${escapeHtml(item.id || '')}" style="margin-top:12px; width:100%;">Löschen</button>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-          </details>
-
-          <details class="accordion" style="margin-top:12px;">
-            <summary>
-              <span>Tageswerte</span>
-              <span class="muted">${escapeHtml(String(timePeriodSummary.dailyRows.length))}</span>
-            </summary>
-            <div class="accordion-body">
-              <div class="list-stack">
-                ${timePeriodSummary.dailyRows.length === 0 ? `<p class="muted" style="margin:0;">Keine Zeiten im gewählten Zeitraum.</p>` : timePeriodSummary.dailyRows.map((row) => `
-                  <div class="compact-card" style="margin:0; padding:10px;">
-                    <div style="font-weight:600;">${escapeHtml(row.date || 'Ohne Datum')}</div>
-                    <div class="compact-meta">Status: ${escapeHtml(getTimeOverviewStatusLabel(row))}</div>
-                    <div class="compact-meta">Geleistet: ${escapeHtml(formatHoursClockLabel(row.totalMinutes))}</div>
-                    <div class="compact-meta">Soll: ${escapeHtml(formatHoursClockLabel(row.plannedMinutes))}</div>
-                    <div class="compact-meta">Saldo: ${escapeHtml(formatHoursClockLabel(Math.abs(row.saldoMinutes)))} ${row.saldoMinutes > 0 ? 'Plus' : row.saldoMinutes < 0 ? 'Minus' : 'Ausgeglichen'}</div>
-                    ${row.absenceType ? `<div class="compact-meta">${escapeHtml(row.absenceType === 'krank' ? 'Krank' : 'Urlaub')} · neutral</div>` : row.isHoliday ? `<div class="compact-meta">Feiertag · neutral</div>` : row.isWorkDay ? `<div class="compact-meta">Arbeitstag</div>` : ''}
-                    ${row.entries && row.entries.length > 0 ? `
-                      <details style="margin-top:8px;">
-                        <summary style="cursor:pointer; color:var(--primary); font-size:13px;">${row.entries.length} Einzeleintrag${row.entries.length === 1 ? '' : 'e'} anzeigen</summary>
-                        <div style="margin-top:8px; display:flex; flex-direction:column; gap:8px;">
-                          ${row.entries.map((entry) => `
-                            <div style="border:1px solid var(--border); border-radius:8px; padding:8px;">
-                              <div style="font-weight:600; font-size:13px;">${escapeHtml(entry.patientName || '—')}</div>
-                              <div class="compact-meta">${escapeHtml(entry.rezeptLabel || '—')}</div>
-                              <div class="compact-meta">${escapeHtml(formatMinutesLabel(entry.minutes))} · ${escapeHtml(getTimeTypeLabel(entry.type))}</div>
-                              ${entry.note ? `<div class="compact-meta">${escapeHtml(entry.note)}</div>` : ''}
-                              <button
-                                class="delete-dashboard-time-entry-btn danger"
-                                style="margin-top:6px; width:100%; padding:6px;"
-                                data-home-id="${escapeHtml(entry.homeId)}"
-                                data-patient-id="${escapeHtml(entry.patientId)}"
-                                data-rezept-id="${escapeHtml(entry.rezeptId)}"
-                                data-time-entry-id="${escapeHtml(entry.timeEntryId)}"
-                              >Eintrag löschen</button>
-                            </div>
-                          `).join('')}
-                        </div>
-                      </details>
-                    ` : ''}
-                  </div>
-                `).join("")}
-              </div>
-            </div>
-          </details>
+          <button id="openZeitraumAuswertungFromOverviewBtn" class="secondary">📅 Zeitraum-Auswertung</button>
+          <button id="openStundenkontoFromOverviewBtn" class="secondary">📊 Stundenkonto</button>
         </div>
         <details class="accordion" style="margin-top:10px;">
           <summary>
@@ -2059,14 +1841,15 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
         <button id="openZeitraumAuswertungBtn" class="secondary">📅 Zeitraum-Auswertung</button>
       </div>
       <div class="row">
+        <button id="openStundenkontoBtn" class="secondary">📊 Stundenkonto</button>
         <button id="openHomesBtn" class="secondary">Einrichtungen</button>
+      </div>
+      <div class="row">
         <button id="openAbgabeBtn" class="secondary">Abgabeliste</button>
-      </div>
-      <div class="row">
         <button id="openNachbestellBtn" class="secondary">Nachbestellung</button>
-        <button id="openKilometerBtn" class="secondary">Kilometer</button>
       </div>
       <div class="row">
+        <button id="openKilometerBtn" class="secondary">Kilometer</button>
         <button id="lockNowBtn" class="secondary">Jetzt sperren</button>
       </div>
     </div>
@@ -2103,350 +1886,15 @@ export function showDashboardView({ onLock, timeSummaryFrom = "", timeSummaryTo 
   document.getElementById("openSettingsBtn").onclick = () => showSettingsView({ onLock });
   document.getElementById("openZeiterfassungBtn").onclick = () => showZeiterfassungView({ onLock });
   document.getElementById("openZeitraumAuswertungBtn").onclick = () => showZeitraumAuswertungView({ onLock });
+  document.getElementById("openStundenkontoBtn").onclick = () => showStundenkontoView({ onLock });
   document.getElementById("openHomesBtn").onclick = () => showHomesView({ onLock });
   document.getElementById("openAbgabeBtn").onclick = () => showAbgabeView({ onLock });
   document.getElementById("openNachbestellBtn").onclick = () => showNachbestellungView({ onLock });
   document.getElementById("openKilometerBtn").onclick = () => showKilometerView({ onLock });
   document.getElementById("lockNowBtn").onclick = onLock;
 
-  const dashboardTimeDate = document.getElementById("dashboardTimeDate");
-  if (dashboardTimeDate) {
-    bindDateAutoFormat(dashboardTimeDate);
-  }
-
-  const dashboardTimeSummaryFrom = document.getElementById("dashboardTimeSummaryFrom");
-  const dashboardTimeSummaryTo = document.getElementById("dashboardTimeSummaryTo");
-  const dashboardAbsenceFrom = document.getElementById("dashboardAbsenceFrom");
-  const dashboardAbsenceTo = document.getElementById("dashboardAbsenceTo");
-  const dashboardHolidayDate = document.getElementById("dashboardHolidayDate");
-  const dashboardAbgleichDatum = document.getElementById("dashboardAbgleichDatum");
-  const dashboardDokuOverviewDate = document.getElementById("dashboardDokuOverviewDate");
-  if (dashboardTimeSummaryFrom) bindDateAutoFormat(dashboardTimeSummaryFrom);
-  if (dashboardTimeSummaryTo) bindDateAutoFormat(dashboardTimeSummaryTo);
-  if (dashboardAbsenceFrom) bindDateAutoFormat(dashboardAbsenceFrom);
-  if (dashboardAbsenceTo) bindDateAutoFormat(dashboardAbsenceTo);
-  if (dashboardHolidayDate) bindDateAutoFormat(dashboardHolidayDate);
-  if (dashboardAbgleichDatum) bindDateAutoFormat(dashboardAbgleichDatum);
-  if (dashboardDokuOverviewDate) bindDateAutoFormat(dashboardDokuOverviewDate);
-
-  const toggleDashboardTimeOverviewBtn = document.getElementById("toggleDashboardTimeOverviewBtn");
-  if (toggleDashboardTimeOverviewBtn) {
-    toggleDashboardTimeOverviewBtn.onclick = () => {
-      const panel = document.getElementById("dashboardTimeOverviewPanel");
-      if (!panel) return;
-      panel.style.display = panel.style.display === "none" ? "block" : "none";
-    };
-  }
-
-  const runDashboardTimeSummaryBtn = document.getElementById("runDashboardTimeSummaryBtn");
-  if (runDashboardTimeSummaryBtn) {
-    runDashboardTimeSummaryBtn.onclick = () => {
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true });
-    };
-  }
-  const printTimeOverviewBtn = document.getElementById("printTimeOverviewBtn");
-  if (printTimeOverviewBtn) {
-    printTimeOverviewBtn.onclick = () => {
-      printTimeOverview();
-    };
-  }
-
-  const openUrlaubBtn = document.getElementById("openUrlaubBtn");
-  if (openUrlaubBtn) {
-    openUrlaubBtn.onclick = () => {
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true, showAbsenceForm: "urlaub" });
-    };
-  }
-
-  const openKrankBtn = document.getElementById("openKrankBtn");
-  if (openKrankBtn) {
-    openKrankBtn.onclick = () => {
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true, showAbsenceForm: "krank" });
-    };
-  }
-
-  const openHolidayBtn = document.getElementById("openHolidayBtn");
-  if (openHolidayBtn) {
-    openHolidayBtn.onclick = () => {
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true, showHolidayForm: true });
-    };
-  }
-
-  const openAbgleichBtn = document.getElementById("openAbgleichBtn");
-  if (openAbgleichBtn) {
-    openAbgleichBtn.onclick = () => {
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true, showAbgleichForm: true });
-    };
-  }
-
-  const openDokuOverviewBtn = document.getElementById("openDokuOverviewBtn");
-  if (openDokuOverviewBtn) {
-    openDokuOverviewBtn.onclick = () => {
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      const dateValue = document.getElementById("dashboardDokuOverviewDate")?.value?.trim() || dokuOverviewDate || formatCurrentDateShort();
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true, showDokuOverview: true, dokuOverviewDate: dateValue });
-    };
-  }
-
-  const runDokuOverviewBtn = document.getElementById("runDokuOverviewBtn");
-  if (runDokuOverviewBtn) {
-    runDokuOverviewBtn.onclick = () => {
-      const msg = document.getElementById("dashboardDokuOverviewMsg");
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      const rawDate = document.getElementById("dashboardDokuOverviewDate").value.trim();
-      const dateValue = normalizeDeDateInput(rawDate) || rawDate;
-      if (!parseDeDate(dateValue)) {
-        if (msg) {
-          msg.className = "error";
-          msg.textContent = "Bitte ein gültiges Datum eingeben.";
-        }
-        return;
-      }
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true, showDokuOverview: true, dokuOverviewDate: dateValue });
-    };
-  }
-
-  const clearDokuOverviewBtn = document.getElementById("clearDokuOverviewBtn");
-  if (clearDokuOverviewBtn) {
-    clearDokuOverviewBtn.onclick = () => {
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true, showDokuOverview: true, dokuOverviewDate: "" });
-    };
-  }
-
-  const cancelDashboardAbsenceBtn = document.getElementById("cancelDashboardAbsenceBtn");
-  if (cancelDashboardAbsenceBtn) {
-    cancelDashboardAbsenceBtn.onclick = () => {
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true, showAbsenceForm: "" });
-    };
-  }
-
-  const cancelDashboardHolidayBtn = document.getElementById("cancelDashboardHolidayBtn");
-  if (cancelDashboardHolidayBtn) {
-    cancelDashboardHolidayBtn.onclick = () => {
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true, showHolidayForm: false });
-    };
-  }
-
-  const cancelDashboardAbgleichBtn = document.getElementById("cancelDashboardAbgleichBtn");
-  if (cancelDashboardAbgleichBtn) {
-    cancelDashboardAbgleichBtn.onclick = () => {
-      const fromValue = document.getElementById("dashboardTimeSummaryFrom").value.trim();
-      const toValue = document.getElementById("dashboardTimeSummaryTo").value.trim();
-      showDashboardView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue, showTimeOverview: true, showAbgleichForm: false });
-    };
-  }
-
-  const saveDashboardAbsenceBtn = document.getElementById("saveDashboardAbsenceBtn");
-  if (saveDashboardAbsenceBtn) {
-    saveDashboardAbsenceBtn.onclick = async () => {
-      const msg = document.getElementById("dashboardAbsenceMsg");
-      const fromValue = document.getElementById("dashboardAbsenceFrom").value.trim();
-      const toValue = document.getElementById("dashboardAbsenceTo").value.trim();
-      const normalizedFrom = parseDeDate(fromValue);
-      const normalizedTo = parseDeDate(toValue);
-      msg.className = "error";
-      msg.textContent = "";
-
-      if (!normalizedFrom || !normalizedTo) {
-        msg.textContent = "Bitte gültige Von- und Bis-Daten eingeben.";
-        return;
-      }
-
-      if (normalizedTo < normalizedFrom) {
-        msg.textContent = "Bis darf nicht vor Von liegen.";
-        return;
-      }
-
-      try {
-        mutateRuntimeData((data) => {
-          if (!Array.isArray(data.abwesenheiten)) data.abwesenheiten = [];
-          data.abwesenheiten.push({
-            id: `abwesenheit_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-            type: showAbsenceForm === 'krank' ? 'krank' : 'urlaub',
-            from: fromValue,
-            to: toValue,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          });
-        });
-        await queuePersistRuntimeData();
-        showDashboardView({ onLock, timeSummaryFrom: document.getElementById("dashboardTimeSummaryFrom").value.trim(), timeSummaryTo: document.getElementById("dashboardTimeSummaryTo").value.trim(), showTimeOverview: true, showAbsenceForm: "" });
-      } catch (err) {
-        console.error(err);
-        msg.textContent = err?.message || "Eintrag konnte nicht gespeichert werden.";
-      }
-    };
-  }
-
-
-  const saveDashboardAbgleichBtn = document.getElementById("saveDashboardAbgleichBtn");
-  if (saveDashboardAbgleichBtn) {
-    saveDashboardAbgleichBtn.onclick = async () => {
-      const msg = document.getElementById("dashboardAbgleichMsg");
-      const typ = document.getElementById("dashboardAbgleichTyp").value === "frei" ? "frei" : "auszahlung";
-      const datumValue = document.getElementById("dashboardAbgleichDatum").value.trim();
-      const stundenValue = document.getElementById("dashboardAbgleichStunden").value.trim();
-      const notiz = document.getElementById("dashboardAbgleichNotiz").value.trim();
-      const normalizedDate = parseDeDate(datumValue);
-      const minuten = Math.abs(parseStundenStartsaldoInput(stundenValue));
-      msg.className = "error";
-      msg.textContent = "";
-
-      if (!normalizedDate) {
-        msg.textContent = "Bitte ein gültiges Datum eingeben.";
-        return;
-      }
-
-      if (!Number.isFinite(minuten) || minuten <= 0) {
-        msg.textContent = "Bitte Stunden im Format HH:MM eingeben, z. B. 30:00.";
-        return;
-      }
-
-      try {
-        mutateRuntimeData((data) => {
-          if (!Array.isArray(data.stundenAbgleiche)) data.stundenAbgleiche = [];
-          data.stundenAbgleiche.push({
-            id: `stundenabgleich_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-            typ,
-            datum: datumValue,
-            minuten,
-            notiz,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          });
-        });
-        await queuePersistRuntimeData();
-        showDashboardView({ onLock, timeSummaryFrom: document.getElementById("dashboardTimeSummaryFrom").value.trim(), timeSummaryTo: document.getElementById("dashboardTimeSummaryTo").value.trim(), showTimeOverview: true, showAbgleichForm: false });
-      } catch (err) {
-        console.error(err);
-        msg.textContent = err?.message || "Abgleich konnte nicht gespeichert werden.";
-      }
-    };
-  }
-
-  const saveDashboardHolidayBtn = document.getElementById("saveDashboardHolidayBtn");
-  if (saveDashboardHolidayBtn) {
-    saveDashboardHolidayBtn.onclick = async () => {
-      const msg = document.getElementById("dashboardHolidayMsg");
-      const dateValue = document.getElementById("dashboardHolidayDate").value.trim();
-      const normalizedDate = parseDeDate(dateValue);
-      msg.className = "error";
-      msg.textContent = "";
-
-      if (!normalizedDate) {
-        msg.textContent = "Bitte ein gültiges Datum eingeben.";
-        return;
-      }
-
-      try {
-        mutateRuntimeData((data) => {
-          if (!Array.isArray(data.specialDays)) data.specialDays = [];
-          const existingIndex = data.specialDays.findIndex((item) => item?.date === dateValue);
-          const nowIso = new Date().toISOString();
-          const nextItem = {
-            id: existingIndex >= 0 && data.specialDays[existingIndex]?.id
-              ? data.specialDays[existingIndex].id
-              : `specialday_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-            type: "holiday",
-            date: dateValue,
-            createdAt: existingIndex >= 0 && data.specialDays[existingIndex]?.createdAt
-              ? data.specialDays[existingIndex].createdAt
-              : nowIso,
-            updatedAt: nowIso
-          };
-          if (existingIndex >= 0) {
-            data.specialDays[existingIndex] = nextItem;
-          } else {
-            data.specialDays.push(nextItem);
-          }
-        });
-        await queuePersistRuntimeData();
-        showDashboardView({ onLock, timeSummaryFrom: document.getElementById("dashboardTimeSummaryFrom").value.trim(), timeSummaryTo: document.getElementById("dashboardTimeSummaryTo").value.trim(), showTimeOverview: true, showHolidayForm: false });
-      } catch (err) {
-        console.error(err);
-        msg.textContent = err?.message || "Feiertag konnte nicht gespeichert werden.";
-      }
-    };
-  }
-
-  document.querySelectorAll('.delete-stunden-abgleich-btn').forEach((button) => {
-    button.onclick = async () => {
-      const abgleichId = button.dataset.abgleichId || '';
-      if (!abgleichId) return;
-      if (!confirm('Diesen Stundenabgleich wirklich löschen?')) return;
-      mutateRuntimeData((data) => {
-        data.stundenAbgleiche = (data.stundenAbgleiche || []).filter((item) => item.id !== abgleichId);
-      });
-      await queuePersistRuntimeData();
-      showDashboardView({ onLock, timeSummaryFrom: document.getElementById("dashboardTimeSummaryFrom").value.trim(), timeSummaryTo: document.getElementById("dashboardTimeSummaryTo").value.trim(), showTimeOverview: true });
-    };
-  });
-
-  document.querySelectorAll('.delete-absence-btn').forEach((button) => {
-    button.onclick = async () => {
-      const absenceId = button.dataset.absenceId || '';
-      if (!absenceId) return;
-      if (!confirm('Diesen Eintrag wirklich löschen?')) return;
-      mutateRuntimeData((data) => {
-        data.abwesenheiten = (data.abwesenheiten || []).filter((item) => item.id !== absenceId);
-      });
-      await queuePersistRuntimeData();
-      showDashboardView({ onLock, timeSummaryFrom: document.getElementById("dashboardTimeSummaryFrom").value.trim(), timeSummaryTo: document.getElementById("dashboardTimeSummaryTo").value.trim(), showTimeOverview: true, showAbsenceForm: "" });
-    };
-  });
-
-  document.querySelectorAll('.delete-special-day-btn').forEach((button) => {
-    button.onclick = async () => {
-      const specialDayId = button.dataset.specialDayId || '';
-      if (!specialDayId) return;
-      if (!confirm('Diesen Feiertag wirklich löschen?')) return;
-      mutateRuntimeData((data) => {
-        data.specialDays = (data.specialDays || []).filter((item) => item.id !== specialDayId);
-      });
-      await queuePersistRuntimeData();
-      showDashboardView({ onLock, timeSummaryFrom: document.getElementById("dashboardTimeSummaryFrom").value.trim(), timeSummaryTo: document.getElementById("dashboardTimeSummaryTo").value.trim(), showTimeOverview: true, showHolidayForm: false });
-    };
-  });
-
-  document.querySelectorAll('.delete-dashboard-time-entry-btn').forEach((button) => {
-    button.onclick = async () => {
-      const { homeId: entryHomeId, patientId: entryPatientId, rezeptId: entryRezeptId, timeEntryId: entryTimeEntryId } = button.dataset;
-      if (!entryHomeId || !entryPatientId || !entryRezeptId || !entryTimeEntryId) return;
-      if (!confirm('Diesen Zeiteintrag wirklich löschen? Dies wirkt sich auf den Zeitsaldo aus.')) return;
-
-      try {
-        deleteRezeptTimeEntry(entryHomeId, entryPatientId, entryRezeptId, entryTimeEntryId);
-        await queuePersistRuntimeData();
-        showDashboardView({
-          onLock,
-          timeSummaryFrom: document.getElementById("dashboardTimeSummaryFrom").value.trim(),
-          timeSummaryTo: document.getElementById("dashboardTimeSummaryTo").value.trim(),
-          showTimeOverview: true
-        });
-      } catch (err) {
-        console.error(err);
-        alert(err?.message || 'Zeiteintrag konnte nicht gelöscht werden.');
-      }
-    };
-  });
+  document.getElementById("openZeitraumAuswertungFromOverviewBtn").onclick = () => showZeitraumAuswertungView({ onLock });
+  document.getElementById("openStundenkontoFromOverviewBtn").onclick = () => showStundenkontoView({ onLock });
 
   const dashboardSaveTimeBtn = document.getElementById("dashboardSaveTimeBtn");
   if (dashboardSaveTimeBtn) {
@@ -5123,6 +4571,412 @@ export function showZeitraumAuswertungView({
         console.error(err);
         alert(err?.message || "Zeiteintrag konnte nicht gelöscht werden.");
       }
+    };
+  });
+}
+
+export function showStundenkontoView({
+  onLock,
+  timeSummaryFrom = "",
+  timeSummaryTo = "",
+  showAbsenceForm = false,
+  showHolidayForm = false,
+  showAbgleichForm = false,
+  msgText = ""
+} = {}) {
+  bindLockButton(onLock);
+  setCurrentView("stundenkonto", { timeSummaryFrom, timeSummaryTo, showAbsenceForm, showHolidayForm, showAbgleichForm });
+
+  const runtimeData = getRuntimeData();
+  const timePeriodSummary = getTimePeriodSummary(runtimeData, timeSummaryFrom, timeSummaryTo);
+  const absenceRows = timePeriodSummary.absenceRows;
+  const specialDayRows = timePeriodSummary.specialDayRows;
+  const stundenAbgleichRows = timePeriodSummary.stundenAbgleichRows || [];
+
+  render(`
+    <div class="card">
+      <h2>Stundenkonto</h2>
+      <button id="stundenkontoBackDashboardBtn" class="secondary">Zurück zum Dashboard</button>
+    </div>
+
+    <div class="card">
+      <label for="stundenkontoFrom">Von</label>
+      <input id="stundenkontoFrom" type="text" value="${escapeHtml(timeSummaryFrom)}" placeholder="TT.MM.JJJJ" inputmode="numeric">
+
+      <label for="stundenkontoTo">Bis</label>
+      <input id="stundenkontoTo" type="text" value="${escapeHtml(timeSummaryTo)}" placeholder="TT.MM.JJJJ" inputmode="numeric">
+
+      <button id="runStundenkontoBtn" style="margin-top:16px;">Auswertung anzeigen</button>
+
+      <div class="compact-card" style="margin-top:16px; padding:16px;">
+        <div style="font-size:18px; font-weight:700; margin-bottom:12px;">Zeitsaldo</div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
+          <div class="compact-meta">Geleistet</div>
+          <div style="font-weight:700; font-size:15px;">${escapeHtml(formatHoursClockLabel(timePeriodSummary.totalMinutes))}</div>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
+          <div class="compact-meta">Soll</div>
+          <div style="font-weight:700; font-size:15px;">${escapeHtml(formatHoursClockLabel(timePeriodSummary.plannedMinutes))}</div>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0 4px 0;">
+          <div style="font-weight:700;">Saldo</div>
+          <div style="font-weight:700; font-size:17px; color:${timePeriodSummary.saldoMinutes >= 0 ? 'var(--primary)' : 'var(--danger)'};">
+            ${timePeriodSummary.saldoMinutes >= 0 ? '+' : ''}${escapeHtml(getSignedMinutesLabel(timePeriodSummary.saldoMinutes))}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Urlaub / Krank</h3>
+      ${!showAbsenceForm ? `<button id="openAbsenceFormBtn" class="secondary">Eintragen</button>` : `
+        <label for="stundenkontoAbsenceFrom">Von</label>
+        <input id="stundenkontoAbsenceFrom" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
+
+        <label for="stundenkontoAbsenceTo">Bis</label>
+        <input id="stundenkontoAbsenceTo" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
+
+        <div class="row" style="margin-top:12px;">
+          <button id="saveAsUrlaubBtn">Urlaub</button>
+          <button id="saveAsKrankBtn">Krank</button>
+        </div>
+        <button id="cancelAbsenceFormBtn" class="secondary">Abbrechen</button>
+        <div id="absenceMsg" class="error"></div>
+      `}
+
+      <details class="accordion" style="margin-top:16px;">
+        <summary>
+          <span>Erfasste Einträge</span>
+          <span class="muted">${escapeHtml(String(absenceRows.length))}</span>
+        </summary>
+        <div class="accordion-body">
+          <div class="list-stack">
+            ${absenceRows.length === 0 ? `<p class="muted" style="margin:0;">Keine Einträge im gewählten Zeitraum.</p>` : ''}
+            ${absenceRows.map((item) => `
+              <div class="compact-card" style="margin:0; padding:12px;">
+                <div style="font-weight:700; font-size:16px; margin-bottom:4px;">${escapeHtml(item.type === 'krank' ? 'Krank' : 'Urlaub')}</div>
+                <div class="compact-meta">${escapeHtml(item.from || '—')} bis ${escapeHtml(item.to || '—')}</div>
+                <button class="delete-absence-btn secondary" data-absence-id="${escapeHtml(item.id || '')}" style="margin-top:12px; width:100%;">Löschen</button>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h3>Feiertage</h3>
+      ${!showHolidayForm ? `<button id="openHolidayFormBtn" class="secondary">Eintragen</button>` : `
+        <label for="stundenkontoHolidayDate">Datum</label>
+        <input id="stundenkontoHolidayDate" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
+
+        <div class="row" style="margin-top:12px;">
+          <button id="saveHolidayBtn">Speichern</button>
+          <button id="cancelHolidayFormBtn" class="secondary">Abbrechen</button>
+        </div>
+        <div id="holidayMsg" class="error"></div>
+      `}
+
+      <details class="accordion" style="margin-top:16px;">
+        <summary>
+          <span>Erfasste Feiertage</span>
+          <span class="muted">${escapeHtml(String(specialDayRows.length))}</span>
+        </summary>
+        <div class="accordion-body">
+          <div class="list-stack">
+            ${specialDayRows.length === 0 ? `<p class="muted" style="margin:0;">Keine Feiertage im gewählten Zeitraum.</p>` : ''}
+            ${specialDayRows.map((item) => `
+              <div class="compact-card" style="margin:0; padding:12px;">
+                <div style="font-weight:700; font-size:16px; margin-bottom:4px;">Feiertag</div>
+                <div class="compact-meta">${escapeHtml(item.date || '—')}</div>
+                <button class="delete-special-day-btn secondary" data-special-day-id="${escapeHtml(item.id || '')}" style="margin-top:12px; width:100%;">Löschen</button>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h3>Stundenabgleich</h3>
+      ${!showAbgleichForm ? `<button id="openAbgleichFormBtn" class="secondary">Eintragen</button>` : `
+        <label for="stundenkontoAbgleichTyp">Art</label>
+        <select id="stundenkontoAbgleichTyp">
+          <option value="auszahlung">Auszahlung</option>
+          <option value="frei">Überstundenfrei</option>
+        </select>
+
+        <label for="stundenkontoAbgleichDatum">Datum</label>
+        <input id="stundenkontoAbgleichDatum" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
+
+        <label for="stundenkontoAbgleichStunden">Stunden</label>
+        <input id="stundenkontoAbgleichStunden" type="text" inputmode="numeric" placeholder="z. B. 30:00">
+
+        <label for="stundenkontoAbgleichNotiz">Notiz</label>
+        <input id="stundenkontoAbgleichNotiz" type="text" placeholder="optional">
+
+        <div class="row" style="margin-top:12px;">
+          <button id="saveAbgleichBtn">Speichern</button>
+          <button id="cancelAbgleichFormBtn" class="secondary">Abbrechen</button>
+        </div>
+        <div id="abgleichMsg" class="error"></div>
+      `}
+
+      <details class="accordion" style="margin-top:16px;">
+        <summary>
+          <span>Erfasste Abgleiche</span>
+          <span class="muted">${escapeHtml(String(stundenAbgleichRows.length))}</span>
+        </summary>
+        <div class="accordion-body">
+          <div class="list-stack">
+            ${stundenAbgleichRows.length === 0 ? `<p class="muted" style="margin:0;">Keine Abgleiche im gewählten Zeitraum.</p>` : ''}
+            ${stundenAbgleichRows.map((item) => `
+              <div class="compact-card" style="margin:0; padding:12px;">
+                <div style="font-weight:700; font-size:16px; margin-bottom:4px;">${escapeHtml(getStundenAbgleichTypLabel(item.typ))}</div>
+                <div class="compact-meta">${escapeHtml(item.datum || '—')} · -${escapeHtml(formatHoursClockLabel(item.minuten || 0))}</div>
+                ${item.notiz ? `<div class="compact-meta">${escapeHtml(item.notiz)}</div>` : ''}
+                <button class="delete-stunden-abgleich-btn secondary" data-abgleich-id="${escapeHtml(item.id || '')}" style="margin-top:12px; width:100%;">Löschen</button>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </details>
+    </div>
+  `);
+
+  document.getElementById("stundenkontoBackDashboardBtn").onclick = () => {
+    setCurrentView("dashboard", {});
+    showDashboardView({ onLock });
+  };
+
+  document.getElementById("runStundenkontoBtn").onclick = () => {
+    const fromValue = document.getElementById("stundenkontoFrom").value.trim();
+    const toValue = document.getElementById("stundenkontoTo").value.trim();
+    showStundenkontoView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue });
+  };
+
+  function currentFromTo() {
+    return {
+      from: document.getElementById("stundenkontoFrom").value.trim(),
+      to: document.getElementById("stundenkontoTo").value.trim()
+    };
+  }
+
+  const openAbsenceFormBtn = document.getElementById("openAbsenceFormBtn");
+  if (openAbsenceFormBtn) {
+    openAbsenceFormBtn.onclick = () => {
+      const { from, to } = currentFromTo();
+      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbsenceForm: true });
+    };
+  }
+  const cancelAbsenceFormBtn = document.getElementById("cancelAbsenceFormBtn");
+  if (cancelAbsenceFormBtn) {
+    cancelAbsenceFormBtn.onclick = () => {
+      const { from, to } = currentFromTo();
+      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbsenceForm: false });
+    };
+  }
+
+  async function saveAbsence(type) {
+    const msg = document.getElementById("absenceMsg");
+    const fromValue = document.getElementById("stundenkontoAbsenceFrom").value.trim();
+    const toValue = document.getElementById("stundenkontoAbsenceTo").value.trim();
+    const normalizedFrom = parseDeDate(fromValue);
+    const normalizedTo = parseDeDate(toValue);
+    msg.textContent = "";
+
+    if (!normalizedFrom || !normalizedTo) {
+      msg.textContent = "Bitte gültige Von- und Bis-Daten eingeben.";
+      return;
+    }
+    if (normalizedTo < normalizedFrom) {
+      msg.textContent = "Bis darf nicht vor Von liegen.";
+      return;
+    }
+
+    try {
+      mutateRuntimeData((data) => {
+        if (!Array.isArray(data.abwesenheiten)) data.abwesenheiten = [];
+        data.abwesenheiten.push({
+          id: `abwesenheit_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+          type,
+          from: fromValue,
+          to: toValue,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+      });
+      await queuePersistRuntimeData();
+      const { from, to } = currentFromTo();
+      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbsenceForm: false });
+    } catch (err) {
+      console.error(err);
+      msg.textContent = err?.message || "Eintrag konnte nicht gespeichert werden.";
+    }
+  }
+
+  const saveAsUrlaubBtn = document.getElementById("saveAsUrlaubBtn");
+  if (saveAsUrlaubBtn) saveAsUrlaubBtn.onclick = () => saveAbsence("urlaub");
+  const saveAsKrankBtn = document.getElementById("saveAsKrankBtn");
+  if (saveAsKrankBtn) saveAsKrankBtn.onclick = () => saveAbsence("krank");
+
+  const openHolidayFormBtn = document.getElementById("openHolidayFormBtn");
+  if (openHolidayFormBtn) {
+    openHolidayFormBtn.onclick = () => {
+      const { from, to } = currentFromTo();
+      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showHolidayForm: true });
+    };
+  }
+  const cancelHolidayFormBtn = document.getElementById("cancelHolidayFormBtn");
+  if (cancelHolidayFormBtn) {
+    cancelHolidayFormBtn.onclick = () => {
+      const { from, to } = currentFromTo();
+      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showHolidayForm: false });
+    };
+  }
+  const saveHolidayBtn = document.getElementById("saveHolidayBtn");
+  if (saveHolidayBtn) {
+    saveHolidayBtn.onclick = async () => {
+      const msg = document.getElementById("holidayMsg");
+      const dateValue = document.getElementById("stundenkontoHolidayDate").value.trim();
+      const normalizedDate = parseDeDate(dateValue);
+      msg.textContent = "";
+
+      if (!normalizedDate) {
+        msg.textContent = "Bitte ein gültiges Datum eingeben.";
+        return;
+      }
+
+      try {
+        mutateRuntimeData((data) => {
+          if (!Array.isArray(data.specialDays)) data.specialDays = [];
+          const existingIndex = data.specialDays.findIndex((item) => item?.date === dateValue);
+          const nowIso = new Date().toISOString();
+          const nextItem = {
+            id: existingIndex >= 0 && data.specialDays[existingIndex]?.id
+              ? data.specialDays[existingIndex].id
+              : `specialday_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+            type: "holiday",
+            date: dateValue,
+            createdAt: existingIndex >= 0 && data.specialDays[existingIndex]?.createdAt
+              ? data.specialDays[existingIndex].createdAt
+              : nowIso,
+            updatedAt: nowIso
+          };
+          if (existingIndex >= 0) {
+            data.specialDays[existingIndex] = nextItem;
+          } else {
+            data.specialDays.push(nextItem);
+          }
+        });
+        await queuePersistRuntimeData();
+        const { from, to } = currentFromTo();
+        showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showHolidayForm: false });
+      } catch (err) {
+        console.error(err);
+        msg.textContent = err?.message || "Feiertag konnte nicht gespeichert werden.";
+      }
+    };
+  }
+
+  const openAbgleichFormBtn = document.getElementById("openAbgleichFormBtn");
+  if (openAbgleichFormBtn) {
+    openAbgleichFormBtn.onclick = () => {
+      const { from, to } = currentFromTo();
+      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbgleichForm: true });
+    };
+  }
+  const cancelAbgleichFormBtn = document.getElementById("cancelAbgleichFormBtn");
+  if (cancelAbgleichFormBtn) {
+    cancelAbgleichFormBtn.onclick = () => {
+      const { from, to } = currentFromTo();
+      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbgleichForm: false });
+    };
+  }
+  const saveAbgleichBtn = document.getElementById("saveAbgleichBtn");
+  if (saveAbgleichBtn) {
+    saveAbgleichBtn.onclick = async () => {
+      const msg = document.getElementById("abgleichMsg");
+      const typ = document.getElementById("stundenkontoAbgleichTyp").value === "frei" ? "frei" : "auszahlung";
+      const datumValue = document.getElementById("stundenkontoAbgleichDatum").value.trim();
+      const stundenValue = document.getElementById("stundenkontoAbgleichStunden").value.trim();
+      const notiz = document.getElementById("stundenkontoAbgleichNotiz").value.trim();
+      const normalizedDate = parseDeDate(datumValue);
+      const minuten = Math.abs(parseStundenStartsaldoInput(stundenValue));
+      msg.textContent = "";
+
+      if (!normalizedDate) {
+        msg.textContent = "Bitte ein gültiges Datum eingeben.";
+        return;
+      }
+      if (!Number.isFinite(minuten) || minuten <= 0) {
+        msg.textContent = "Bitte Stunden im Format HH:MM eingeben, z. B. 30:00.";
+        return;
+      }
+
+      try {
+        mutateRuntimeData((data) => {
+          if (!Array.isArray(data.stundenAbgleiche)) data.stundenAbgleiche = [];
+          data.stundenAbgleiche.push({
+            id: `stundenabgleich_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+            typ,
+            datum: datumValue,
+            minuten,
+            notiz,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          });
+        });
+        await queuePersistRuntimeData();
+        const { from, to } = currentFromTo();
+        showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbgleichForm: false });
+      } catch (err) {
+        console.error(err);
+        msg.textContent = err?.message || "Abgleich konnte nicht gespeichert werden.";
+      }
+    };
+  }
+
+  document.querySelectorAll('.delete-absence-btn').forEach((button) => {
+    button.onclick = async () => {
+      const absenceId = button.dataset.absenceId || '';
+      if (!absenceId) return;
+      if (!confirm('Diesen Eintrag wirklich löschen?')) return;
+      mutateRuntimeData((data) => {
+        data.abwesenheiten = (data.abwesenheiten || []).filter((item) => item.id !== absenceId);
+      });
+      await queuePersistRuntimeData();
+      const { from, to } = currentFromTo();
+      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to });
+    };
+  });
+
+  document.querySelectorAll('.delete-special-day-btn').forEach((button) => {
+    button.onclick = async () => {
+      const specialDayId = button.dataset.specialDayId || '';
+      if (!specialDayId) return;
+      if (!confirm('Diesen Feiertag wirklich löschen?')) return;
+      mutateRuntimeData((data) => {
+        data.specialDays = (data.specialDays || []).filter((item) => item.id !== specialDayId);
+      });
+      await queuePersistRuntimeData();
+      const { from, to } = currentFromTo();
+      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to });
+    };
+  });
+
+  document.querySelectorAll('.delete-stunden-abgleich-btn').forEach((button) => {
+    button.onclick = async () => {
+      const abgleichId = button.dataset.abgleichId || '';
+      if (!abgleichId) return;
+      if (!confirm('Diesen Abgleich wirklich löschen?')) return;
+      mutateRuntimeData((data) => {
+        data.stundenAbgleiche = (data.stundenAbgleiche || []).filter((item) => item.id !== abgleichId);
+      });
+      await queuePersistRuntimeData();
+      const { from, to } = currentFromTo();
+      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to });
     };
   });
 }
