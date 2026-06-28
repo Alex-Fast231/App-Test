@@ -1953,6 +1953,23 @@ export function showDashboardView({ onLock } = {}) {
   document.getElementById("openZeitraumAuswertungFromOverviewBtn").onclick = () => showZeitraumAuswertungView({ onLock });
   document.getElementById("openStundenkontoFromOverviewBtn").onclick = () => showStundenkontoView({ onLock });
 
+  document.querySelectorAll('.delete-dashboard-time-entry-btn').forEach((button) => {
+    button.onclick = async () => {
+      const { homeId, patientId, rezeptId, timeEntryId } = button.dataset;
+      if (!homeId || !patientId || !rezeptId || !timeEntryId) return;
+      if (!confirm('Diesen Zeiteintrag wirklich löschen?')) return;
+
+      try {
+        deleteRezeptTimeEntry(homeId, patientId, rezeptId, timeEntryId);
+        await queuePersistRuntimeData();
+        showDashboardView({ onLock });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || 'Zeiteintrag konnte nicht gelöscht werden.');
+      }
+    };
+  });
+
   const dashboardSaveTimeBtn = document.getElementById("dashboardSaveTimeBtn");
   if (dashboardSaveTimeBtn) {
     dashboardSaveTimeBtn.onclick = async () => {
