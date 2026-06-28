@@ -625,6 +625,59 @@ function getPatientsInDateRange(data, fromDate, toDate) {
   });
 }
 
+// Etappe C: App-weite Patientensuche. Findet passende Patienten über alle
+// Heime hinweg und liefert für jeden Treffer die komplette Zeit-Historie
+// (alle Zeiteinträge, unabhängig vom Datum), chronologisch sortiert.
+function searchPatientsAcrossApp(data, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return [];
+
+  const results = [];
+  (data?.homes || []).forEach((home) => {
+    (home?.patients || []).forEach((patient) => {
+      const haystack = [
+        patient?.firstName || "",
+        patient?.lastName || "",
+        patient?.birthDate || ""
+      ].join(" ").toLowerCase();
+
+      if (!haystack.includes(q)) return;
+
+      const entries = [];
+      (patient?.rezepte || []).forEach((rezept) => {
+        getRezeptTimeEntries(rezept).forEach((entry) => {
+          const minutes = Number(entry?.minutes || 0);
+          if (!Number.isFinite(minutes) || minutes <= 0) return;
+          entries.push({
+            date: String(entry?.date || '').trim(),
+            minutes,
+            rezeptLabel: rezeptSummary(rezept),
+            type: entry?.type || '',
+            note: entry?.note || '',
+            homeId: home?.homeId || '',
+            patientId: patient?.patientId || '',
+            rezeptId: rezept?.rezeptId || '',
+            timeEntryId: entry?.timeEntryId || ''
+          });
+        });
+      });
+
+      entries.sort((a, b) => compareDeDates(a.date, b.date));
+
+      results.push({
+        patientId: patient?.patientId || '',
+        homeId: home?.homeId || '',
+        patientName: `${patient?.lastName || ""}, ${patient?.firstName || ""}`.replace(/^,\s*/, "").trim() || 'Ohne Namen',
+        homeName: home?.name || '',
+        totalMinutes: entries.reduce((s, e) => s + e.minutes, 0),
+        entries
+      });
+    });
+  });
+
+  return results.sort((a, b) => collatorDE.compare(a.patientName, b.patientName));
+}
+
 function getDocumentationOverviewRows(data, targetDate = "") {
   const normalizedDate = normalizeDeDateInput(String(targetDate || '').trim()) || String(targetDate || '').trim();
   if (!normalizedDate || !parseDeDate(normalizedDate)) return [];
@@ -1842,14 +1895,17 @@ export function showDashboardView({ onLock } = {}) {
       </div>
       <div class="row">
         <button id="openStundenkontoBtn" class="secondary">📊 Stundenkonto</button>
+        <button id="openPatientensucheBtn" class="secondary">🔍 Patienten-Suche</button>
+      </div>
+      <div class="row">
         <button id="openHomesBtn" class="secondary">Einrichtungen</button>
-      </div>
-      <div class="row">
         <button id="openAbgabeBtn" class="secondary">Abgabeliste</button>
-        <button id="openNachbestellBtn" class="secondary">Nachbestellung</button>
       </div>
       <div class="row">
+        <button id="openNachbestellBtn" class="secondary">Nachbestellung</button>
         <button id="openKilometerBtn" class="secondary">Kilometer</button>
+      </div>
+      <div class="row">
         <button id="lockNowBtn" class="secondary">Jetzt sperren</button>
       </div>
     </div>
@@ -1887,6 +1943,7 @@ export function showDashboardView({ onLock } = {}) {
   document.getElementById("openZeiterfassungBtn").onclick = () => showZeiterfassungView({ onLock });
   document.getElementById("openZeitraumAuswertungBtn").onclick = () => showZeitraumAuswertungView({ onLock });
   document.getElementById("openStundenkontoBtn").onclick = () => showStundenkontoView({ onLock });
+  document.getElementById("openPatientensucheBtn").onclick = () => showPatientensucheView({ onLock });
   document.getElementById("openHomesBtn").onclick = () => showHomesView({ onLock });
   document.getElementById("openAbgabeBtn").onclick = () => showAbgabeView({ onLock });
   document.getElementById("openNachbestellBtn").onclick = () => showNachbestellungView({ onLock });
@@ -4977,6 +5034,106 @@ export function showStundenkontoView({
       await queuePersistRuntimeData();
       const { from, to } = currentFromTo();
       showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to });
+    };
+  });
+}
+
+export function showPatientensucheView({ onLock, query = "" } = {}) {
+  bindLockButton(onLock);
+  setCurrentView("patientensuche", { query });
+
+  const runtimeData = getRuntimeData();
+  const trimmedQuery = String(query || "").trim();
+  const results = trimmedQuery ? searchPatientsAcrossApp(runtimeData, trimmedQuery) : [];
+
+  render(`
+    <div class="card">
+      <h2>Patienten-Suche</h2>
+      <button id="patientensucheBackDashboardBtn" class="secondary">Zurück zum Dashboard</button>
+    </div>
+
+    <div class="card">
+      <label for="patientensucheInput">Patientenname</label>
+      <input id="patientensucheInput" type="text" value="${escapeHtml(trimmedQuery)}" placeholder="z. B. Müller">
+      <button id="patientensucheSearchBtn" style="margin-top:16px;">Suchen</button>
+      <p class="muted" style="margin-top:12px; margin-bottom:0;">Zeigt alle erfassten Zeiten dieses Patienten, über die gesamte Historie.</p>
+    </div>
+
+    ${trimmedQuery ? `
+      <div class="card">
+        <h3>Ergebnisse</h3>
+        ${results.length === 0
+          ? `<p class="muted">Kein Patient gefunden für "${escapeHtml(trimmedQuery)}".</p>`
+          : results.map(result => `
+              <details class="accordion">
+                <summary>
+                  <span>${escapeHtml(result.patientName)}</span>
+                  <span class="muted">${escapeHtml(formatHoursClockLabel(result.totalMinutes))}</span>
+                </summary>
+                <div class="accordion-body">
+                  <p class="compact-meta" style="margin-top:0;">${escapeHtml(result.homeName || '—')}</p>
+                  ${result.entries.length === 0
+                    ? `<p class="muted" style="margin:0;">Keine Zeiteinträge erfasst.</p>`
+                    : `<div class="list-stack">
+                        ${result.entries.map(entry => `
+                          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid var(--border);">
+                            <div style="min-width:0;">
+                              <div style="font-weight:600; font-size:15px;">${escapeHtml(entry.date || 'Ohne Datum')}</div>
+                              <div class="compact-meta">${escapeHtml(entry.rezeptLabel || '—')}</div>
+                              ${entry.note ? `<div class="compact-meta">${escapeHtml(entry.note)}</div>` : ''}
+                            </div>
+                            <div style="display:flex; align-items:center; gap:10px; flex-shrink:0;">
+                              <div style="font-weight:700; color:var(--primary); font-size:15px; white-space:nowrap;">${escapeHtml(formatMinutesLabel(entry.minutes))}</div>
+                              <button
+                                class="delete-patientensuche-entry-btn danger"
+                                style="padding:6px 10px; font-size:13px; white-space:nowrap;"
+                                data-home-id="${escapeHtml(entry.homeId)}"
+                                data-patient-id="${escapeHtml(entry.patientId)}"
+                                data-rezept-id="${escapeHtml(entry.rezeptId)}"
+                                data-time-entry-id="${escapeHtml(entry.timeEntryId)}"
+                              >Löschen</button>
+                            </div>
+                          </div>
+                        `).join('')}
+                      </div>`
+                  }
+                </div>
+              </details>
+            `).join('')
+        }
+      </div>
+    ` : ''}
+  `);
+
+  document.getElementById("patientensucheBackDashboardBtn").onclick = () => {
+    setCurrentView("dashboard", {});
+    showDashboardView({ onLock });
+  };
+
+  function runSearch() {
+    const value = document.getElementById("patientensucheInput").value.trim();
+    showPatientensucheView({ onLock, query: value });
+  }
+
+  document.getElementById("patientensucheSearchBtn").onclick = runSearch;
+  document.getElementById("patientensucheInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") runSearch();
+  });
+
+  document.querySelectorAll(".delete-patientensuche-entry-btn").forEach((btn) => {
+    btn.onclick = async () => {
+      const { homeId, patientId, rezeptId, timeEntryId } = btn.dataset;
+      if (!homeId || !patientId || !rezeptId || !timeEntryId) return;
+      if (!confirm("Diesen Zeiteintrag wirklich löschen?")) return;
+
+      try {
+        deleteRezeptTimeEntry(homeId, patientId, rezeptId, timeEntryId);
+        await queuePersistRuntimeData();
+        showPatientensucheView({ onLock, query: trimmedQuery });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || "Zeiteintrag konnte nicht gelöscht werden.");
+      }
     };
   });
 }
