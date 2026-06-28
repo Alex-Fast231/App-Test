@@ -4959,7 +4959,7 @@ export function showZeitraumAuswertungView({
         <button id="quickThisWeekBtn" class="secondary" style="margin-top:0;">Diese Woche</button>
         <button id="quickLastWeekBtn" class="secondary" style="margin-top:0;">Letzte Woche</button>
       </div>
-      <div class="row">
+      <div class="row" style="margin-top:12px;">
         <button id="quickThisMonthBtn" class="secondary" style="margin-top:0;">Dieser Monat</button>
         <button id="quickLastMonthBtn" class="secondary" style="margin-top:0;">Letzter Monat</button>
       </div>
