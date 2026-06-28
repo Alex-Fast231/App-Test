@@ -1789,7 +1789,7 @@ export function showSettingsView({ onLock }) {
   };
 }
 
-export function showDashboardView({ onLock } = {}) {
+export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
   bindLockButton(onLock);
   setCurrentView("dashboard");
 
@@ -1804,7 +1804,7 @@ export function showDashboardView({ onLock } = {}) {
   render(`
     ${renderDashboardHeaderCard({ therapistName, lastBackupAt })}
 
-    <details class="accordion">
+    <details class="accordion" ${keepOverviewOpen ? 'open' : ''}>
       <summary>
         <span>Überblick</span>
         <span class="muted">Stunden</span>
@@ -1819,7 +1819,7 @@ export function showDashboardView({ onLock } = {}) {
           <button id="openZeitraumAuswertungFromOverviewBtn" class="secondary">📅 Zeitraum-Auswertung</button>
           <button id="openStundenkontoFromOverviewBtn" class="secondary">📊 Stundenkonto</button>
         </div>
-        <details class="accordion" style="margin-top:10px;">
+        <details class="accordion" style="margin-top:10px;" ${keepOverviewOpen ? 'open' : ''}>
           <summary>
             <span>Patienten heute</span>
             <span class="muted">${dashboardTodayPatients.length} · ${escapeHtml(formatMinutesLabel(dashboardTodayPatients.reduce((s, r) => s + r.totalMinutes, 0)))}</span>
@@ -1960,9 +1960,11 @@ export function showDashboardView({ onLock } = {}) {
       if (!confirm('Diesen Zeiteintrag wirklich löschen?')) return;
 
       try {
+        const scrollPosition = window.scrollY;
         deleteRezeptTimeEntry(homeId, patientId, rezeptId, timeEntryId);
         await queuePersistRuntimeData();
-        showDashboardView({ onLock });
+        showDashboardView({ onLock, keepOverviewOpen: true });
+        window.scrollTo(0, scrollPosition);
       } catch (err) {
         console.error(err);
         alert(err?.message || 'Zeiteintrag konnte nicht gelöscht werden.');
