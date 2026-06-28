@@ -23,6 +23,36 @@ export function applyUpdate() {
   waitingWorker.postMessage({ type: "SKIP_WAITING" });
 }
 
+// Fragt einen beliebigen Service-Worker-Eintrag (aktiv oder wartend) nach
+// seiner SW_VERSION. So lässt sich zuverlässig anzeigen, welcher Code-Stand
+// WIRKLICH aktiv ist - unabhängig von ZIP-Dateinamen oder Annahmen.
+function askWorkerForVersion(worker) {
+  return new Promise((resolve) => {
+    if (!worker) {
+      resolve(null);
+      return;
+    }
+    const channel = new MessageChannel();
+    const timeout = setTimeout(() => resolve(null), 2000);
+    channel.port1.onmessage = (event) => {
+      clearTimeout(timeout);
+      resolve(event.data?.version || null);
+    };
+    worker.postMessage({ type: "GET_VERSION" }, [channel.port2]);
+  });
+}
+
+export async function getActiveVersion() {
+  if (!("serviceWorker" in navigator)) return null;
+  const registration = await navigator.serviceWorker.getRegistration().catch(() => null);
+  if (!registration?.active) return null;
+  return askWorkerForVersion(registration.active);
+}
+
+export async function getWaitingVersion() {
+  return askWorkerForVersion(waitingWorker);
+}
+
 export function initServiceWorkerUpdates() {
   if (!("serviceWorker" in navigator)) return;
 

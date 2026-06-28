@@ -355,7 +355,7 @@
 </head>
 <body>
   <header>
-    <div class="brand">FaSt-Doku</div>
+    <div class="brand">FaSt-Doku<span id="appVersionLabel" style="display:block; font-size:11px; font-weight:400; opacity:0.6; margin-top:2px;"></span></div>
     <div class="header-actions" style="display:flex; gap:8px;">
       <button id="updateAvailableBtn" class="secondary" style="display:none; background:#166534;">⬇️ Update</button>
       <button id="lockBtn" class="secondary" style="display:none;">Sperren</button>
@@ -366,12 +366,28 @@
 
   <script type="module">
     if ("serviceWorker" in navigator) {
-      import("./core/update.js").then(({ initServiceWorkerUpdates, onUpdateAvailable, applyUpdate }) => {
+      import("./core/update.js").then(({ initServiceWorkerUpdates, onUpdateAvailable, applyUpdate, getActiveVersion, getWaitingVersion }) => {
         initServiceWorkerUpdates();
 
         const updateBtn = document.getElementById("updateAvailableBtn");
+        const versionLabel = document.getElementById("appVersionLabel");
+
+        function refreshVersionLabel() {
+          getActiveVersion().then((version) => {
+            if (version && versionLabel) {
+              versionLabel.textContent = version;
+            }
+          });
+        }
+        refreshVersionLabel();
+
         onUpdateAvailable(() => {
           updateBtn.style.display = "inline-block";
+          getWaitingVersion().then((version) => {
+            if (version) {
+              updateBtn.textContent = `⬇️ Update (${version})`;
+            }
+          });
         });
 
         updateBtn.onclick = () => {
@@ -379,6 +395,10 @@
           updateBtn.textContent = "Wird aktualisiert…";
           applyUpdate();
         };
+
+        // Nach erfolgreichem Update lädt sich die Seite neu (siehe
+        // core/update.js controllerchange) - dann zeigt refreshVersionLabel
+        // beim nächsten Laden automatisch die neue, wirklich aktive Version.
       });
     }
   </script>
