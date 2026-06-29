@@ -1629,7 +1629,12 @@ export function showLoginView({ onSuccess }) {
   };
 }
 
-const BACKUP_WARNING_DAYS = 14;
+// Angepasst wegen Samsungs "Nicht genutzte Apps schlafen legen"-Funktion,
+// die bei manchen Geräten bereits nach 3-4 Tagen Nichtnutzung greifen kann
+// und dabei den App-Speicher (inkl. IndexedDB) zurücksetzen kann. Häufigere
+// Erinnerungen sollen das Risiko eines folgenlosen Datenverlusts reduzieren.
+const BACKUP_WARNING_DAYS = 5;
+const BACKUP_NOTICE_DAYS = 3;
 
 function getBackupWarning(lastBackupAt) {
   if (!lastBackupAt) {
@@ -1653,7 +1658,7 @@ function getBackupWarning(lastBackupAt) {
     };
   }
 
-  if (daysSince >= 7) {
+  if (daysSince >= BACKUP_NOTICE_DAYS) {
     return {
       level: "warning",
       text: `Letztes Backup vor ${daysSince} Tagen.`
