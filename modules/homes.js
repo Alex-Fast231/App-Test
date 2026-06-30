@@ -427,11 +427,39 @@ export function addManualKilometerTravel(payload) {
     if (!fromPointId || !toPointId) throw new Error('Bitte Start- und Zielpunkt auswählen.');
     if (fromPointId === toPointId) throw new Error('Start- und Zielpunkt dürfen nicht identisch sein.');
     if (!Number.isFinite(km) || km <= 0) throw new Error('Bitte gültige Kilometer eingeben.');
-    if (!note) throw new Error('Bitte eine Begründung eingeben.');
 
     const fromPoint = pointMap.get(fromPointId);
     const toPoint = pointMap.get(toPointId);
     if (!fromPoint || !toPoint) throw new Error('Ausgewählte Strecke ist ungültig.');
+
+    // Eine bisher unbekannte Strecke wird automatisch für künftige Fahrten
+    // gemerkt (in beide Richtungen, wie auch saveKnownKilometerRoute es tut).
+    // Ist die Strecke bereits bekannt, bleibt der gemerkte Wert unverändert -
+    // ein abweichender km-Wert gilt dann nur für diese eine Fahrt (z.B.
+    // Umweg), nicht als neuer Standard.
+    if (!findKnownRoute(kilometerState, fromPointId, toPointId)) {
+      const now = new Date().toISOString();
+      kilometerState.knownRoutes.push({
+        routeId: generateId('route'),
+        fromPointId,
+        toPointId,
+        fromLabel: fromPoint.label,
+        toLabel: toPoint.label,
+        km,
+        createdAt: now,
+        updatedAt: now
+      });
+      kilometerState.knownRoutes.push({
+        routeId: generateId('route'),
+        fromPointId: toPointId,
+        toPointId: fromPointId,
+        fromLabel: toPoint.label,
+        toLabel: fromPoint.label,
+        km,
+        createdAt: now,
+        updatedAt: now
+      });
+    }
 
     kilometerState.travelLog.push({
       travelId: generateId('travel'),

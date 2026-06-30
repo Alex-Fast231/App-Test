@@ -55,7 +55,6 @@ import {
   getRezeptTimeEntries,
   getRezeptTimeSummary,
   getRezeptEntryAutoMinutes,
-  getPendingKilometerContext,
   saveKilometerStartPoint,
   saveKnownKilometerRoute,
   getKilometerOverview,
@@ -2616,27 +2615,6 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
           msg.textContent = 'Bitte ein gültiges Behandlungsdatum im Format TT.MM.JJJJ eingeben.';
           return;
         }
-        const pendingKm = getPendingKilometerContext(homeId, patientId, quickDate);
-        if (pendingKm.needsKmInput) {
-          const entered = window.prompt(`Bitte Entfernung eingeben:
-${pendingKm.fromLabel} → ${pendingKm.toLabel}`, "");
-          if (entered === null) {
-            msg.textContent = 'SchnellDoku abgebrochen, da die Kilometer nicht eingegeben wurden.';
-            return;
-          }
-          const kmValue = Number(String(entered).replace(',', '.'));
-          if (!Number.isFinite(kmValue) || kmValue <= 0) {
-            msg.textContent = 'Bitte gültige Kilometer für die neue Strecke eingeben.';
-            return;
-          }
-          saveKnownKilometerRoute({
-            fromPointId: pendingKm.fromPointId,
-            toPointId: pendingKm.toPointId,
-            fromLabel: pendingKm.fromLabel,
-            toLabel: pendingKm.toLabel,
-            km: kmValue
-          });
-        }
 
         createRezeptEntry(homeId, patientId, targetRezeptId, {
           date: quickDate,
@@ -4012,16 +3990,25 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
     collatorDE.compare(`${a.fromLabel || ""} ${a.toLabel || ""}`, `${b.fromLabel || ""} ${b.toLabel || ""}`)
   );
   const editingItem = editTravelId ? travelLog.find((item) => item.travelId === editTravelId) || null : null;
-  const formTitle = editingItem ? "Fahrt bearbeiten" : "Manuelle Fahrt ergänzen";
+  const formTitle = editingItem ? "Fahrt bearbeiten" : "Fahrt eintragen";
   const formHint = editingItem
     ? "Kilometer, Datum und Strecke dieser Fahrt können hier korrigiert werden."
-    : "Für Ausnahmefälle wie zusätzliche Wechsel zwischen Einrichtungen. Begründung ist Pflicht.";
-  const formButtonLabel = editingItem ? "Fahrt aktualisieren" : "Manuelle Fahrt speichern";
+    : "Strecke auswählen oder neu anlegen. Bekannte Strecken werden automatisch mit ihrer hinterlegten Kilometerzahl vorausgefüllt.";
+  const formButtonLabel = editingItem ? "Fahrt aktualisieren" : "Fahrt speichern";
   const formDateValue = editingItem?.date || summaryTo || summaryFrom || "";
   const formFromValue = editingItem?.fromPointId || "";
   const formToValue = editingItem?.toPointId || "";
   const formKmValue = editingItem ? String(editingItem.km ?? "") : "";
   const formReasonValue = editingItem?.note || "";
+
+  // Für das Vorausfüllen der Kilometer im Formular: Map von "von|nach" auf km
+  const knownRouteKmMap = {};
+  (overview.knownRoutes || []).forEach((route) => {
+    const from = String(route?.fromPointId || "");
+    const to = String(route?.toPointId || "");
+    if (!from || !to) return;
+    knownRouteKmMap[`${from}|${to}`] = Number(route.km || 0);
+  });
 
   render(`
     <div class="card">
@@ -4032,7 +4019,7 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
     <details class="accordion" ${editingItem ? 'open' : ''}>
       <summary>
         <span>${escapeHtml(formTitle)}</span>
-        <span class="muted">${editingItem ? 'Korrektur' : 'Ausnahmefälle'}</span>
+        <span class="muted">${editingItem ? 'Korrektur' : ''}</span>
       </summary>
       <div class="accordion-body">
       <h3>${escapeHtml(formTitle)}</h3>
@@ -4055,9 +4042,10 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
 
       <label for="manualKmValue">Kilometer</label>
       <input id="manualKmValue" type="number" min="0" step="0.1" value="${escapeHtml(formKmValue)}" placeholder="z.B. 7.5">
+      <p id="manualKmAutoHint" class="muted" style="margin-top:4px; display:none;"></p>
 
-      <label for="manualKmReason">Begründung</label>
-      <input id="manualKmReason" type="text" value="${escapeHtml(formReasonValue)}" placeholder="z.B. viele Ausfälle, Patienten später, Krankenhaus">
+      <label for="manualKmReason">Notiz (optional)</label>
+      <input id="manualKmReason" type="text" value="${escapeHtml(formReasonValue)}" placeholder="z.B. Umweg wegen Stau">
 
       <div class="row">
         <button id="saveManualKmBtn">${escapeHtml(formButtonLabel)}</button>
@@ -4166,6 +4154,33 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
   bindSelectableCardChecks(app);
 
   document.getElementById("backDashboardBtn").onclick = () => showDashboardView({ onLock });
+
+  function updateManualKmAutoFill() {
+    const fromValue = document.getElementById("manualKmFrom").value;
+    const toValue = document.getElementById("manualKmTo").value;
+    const hint = document.getElementById("manualKmAutoHint");
+    if (!fromValue || !toValue || fromValue === toValue) {
+      hint.style.display = "none";
+      return;
+    }
+    const knownKm = knownRouteKmMap[`${fromValue}|${toValue}`];
+    if (knownKm !== undefined) {
+      document.getElementById("manualKmValue").value = String(knownKm);
+      hint.textContent = `Bekannte Strecke: ${formatKm(knownKm)} (kann bei Bedarf überschrieben werden)`;
+      hint.style.display = "block";
+    } else {
+      hint.textContent = "Neue Strecke – wird nach dem Speichern für künftige Fahrten gemerkt.";
+      hint.style.display = "block";
+    }
+  }
+
+  document.getElementById("manualKmFrom").addEventListener("change", updateManualKmAutoFill);
+  document.getElementById("manualKmTo").addEventListener("change", updateManualKmAutoFill);
+  // Nur bei neuen Einträgen automatisch vorausfüllen. Beim Bearbeiten eines
+  // bestehenden Eintrags soll der dort gespeicherte (ggf. bewusst
+  // abweichende) km-Wert nicht durch den Strecken-Standard überschrieben
+  // werden.
+  if (!editingItem && formFromValue && formToValue) updateManualKmAutoFill();
 
   document.getElementById("saveStartPointBtn").onclick = async () => {
     const label = document.getElementById("kmStartLabel").value.trim() || "Startpunkt";
