@@ -3995,7 +3995,7 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
     ? "Kilometer, Datum und Strecke dieser Fahrt können hier korrigiert werden."
     : "Strecke auswählen oder neu anlegen. Bekannte Strecken werden automatisch mit ihrer hinterlegten Kilometerzahl vorausgefüllt.";
   const formButtonLabel = editingItem ? "Fahrt aktualisieren" : "Fahrt speichern";
-  const formDateValue = editingItem?.date || summaryTo || summaryFrom || "";
+  const formDateValue = editingItem?.date || formatCurrentDateShort();
   const formFromValue = editingItem?.fromPointId || "";
   const formToValue = editingItem?.toPointId || "";
   const formKmValue = editingItem ? String(editingItem.km ?? "") : "";
