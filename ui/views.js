@@ -1038,6 +1038,29 @@ function openHtmlDocument(title, bodyHtml, { autoPrint = false } = {}) {
           border-bottom:1px solid #d1d5db;
           padding:10px 0;
         }
+        table{
+          width:100%;
+          border-collapse:collapse;
+          margin-top:12px;
+        }
+        th, td{
+          border:1px solid #d1d5db;
+          padding:8px 10px;
+          text-align:left;
+          font-size:14px;
+        }
+        th{
+          background:#f3f4f6;
+          font-weight:700;
+        }
+        td.numeric, th.numeric{
+          text-align:right;
+          white-space:nowrap;
+        }
+        tfoot td{
+          font-weight:700;
+          background:#f9fafb;
+        }
         .muted{
           color:#6b7280;
           font-size:12px;
@@ -4225,16 +4248,35 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
       "Kilometerzettel",
       `
         <div class="row"><strong>Zeitraum:</strong> ${escapeHtml(fromValue || "—")} bis ${escapeHtml(toValue || "—")}</div>
-        <div class="row"><strong>Gesamtkilometer:</strong> ${escapeHtml(formatKm(currentSummary.totalKm))}</div>
-        <div class="row"><strong>Vergütung:</strong> ${escapeHtml(formatEuro(currentSummary.totalAmount))}</div>
-        ${currentSummary.rows.map((item) => `
-          <div class="row">
-            <strong>${escapeHtml(item.date || "Ohne Datum")}</strong> · ${escapeHtml(formatKm(item.km || 0))}<br>
-            <span class="muted">${escapeHtml(item.fromLabel || "—")} → ${escapeHtml(item.toLabel || "—")}</span><br>
-            <span class="muted">Typ: ${item.source === "manual" ? "Manuell" : "Automatisch"}${item.manualAdjusted ? ' · manuell korrigiert' : ''}</span>
-            ${item.note ? `<br><span class="muted">Begründung: ${escapeHtml(item.note)}</span>` : ""}
-          </div>
-        `).join("")}
+        <table>
+          <thead>
+            <tr>
+              <th>Datum</th>
+              <th>Von</th>
+              <th>Nach</th>
+              <th class="numeric">Kilometer</th>
+              <th class="numeric">Wert</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${currentSummary.rows.map((item) => `
+              <tr>
+                <td>${escapeHtml(item.date || "—")}</td>
+                <td>${escapeHtml(item.fromLabel || "—")}</td>
+                <td>${escapeHtml(item.toLabel || "—")}</td>
+                <td class="numeric">${escapeHtml(formatKm(item.km || 0))}</td>
+                <td class="numeric">${escapeHtml(formatEuro((Number(item.km) || 0) * 0.3))}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colspan="3">Summe</td>
+              <td class="numeric">${escapeHtml(formatKm(currentSummary.totalKm))}</td>
+              <td class="numeric">${escapeHtml(formatEuro(currentSummary.totalAmount))}</td>
+            </tr>
+          </tfoot>
+        </table>
       `
     );
 
