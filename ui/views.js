@@ -63,7 +63,8 @@ import {
   updateKilometerTravel,
   deleteKilometerTravel,
   getKilometerPeriodSummary,
-  finalizeKilometerExport
+  finalizeKilometerExport,
+  previewNextKilometerZettelNumber
 } from "../modules/homes.js";
 import { getRezeptFristInfo } from "../modules/fristen.js";
 import { exportBackup, importBackup, downloadBlob, validateBackupZip } from "../modules/backup.js";
@@ -865,6 +866,44 @@ function formatKm(value) {
 function formatEuro(value) {
   const amount = Number(value || 0);
   return `${amount.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+}
+
+function buildKilometerZettelHtml({ number, therapistName, fromDate, toDate, rows, totalKm, totalAmount }) {
+  return `
+    <h1>FaSt Kilometer</h1>
+    <div class="row"><strong>Nummer:</strong> ${escapeHtml(number || "—")}</div>
+    <div class="row"><strong>Therapeut:</strong> ${escapeHtml(therapistName || "—")}</div>
+    <div class="row"><strong>Zeitraum:</strong> ${escapeHtml(fromDate || "—")} bis ${escapeHtml(toDate || "—")}</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Datum</th>
+          <th>Von</th>
+          <th>Nach</th>
+          <th class="numeric">Kilometer</th>
+          <th class="numeric">Wert</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((item) => `
+          <tr>
+            <td>${escapeHtml(item.date || "—")}</td>
+            <td>${escapeHtml(item.fromLabel || "—")}</td>
+            <td>${escapeHtml(item.toLabel || "—")}</td>
+            <td class="numeric">${escapeHtml(formatKm(item.km || 0))}</td>
+            <td class="numeric">${escapeHtml(formatEuro((Number(item.km) || 0) * 0.3))}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="3">Summe</td>
+          <td class="numeric">${escapeHtml(formatKm(totalKm))}</td>
+          <td class="numeric">${escapeHtml(formatEuro(totalAmount))}</td>
+        </tr>
+      </tfoot>
+    </table>
+  `;
 }
 
 function formatCurrentDateLong(date = new Date()) {
@@ -1933,6 +1972,7 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
         <button id="openKilometerBtn" class="secondary">Kilometer</button>
       </div>
       <div class="row">
+        <button id="openUnterschriftenblattBtn" class="secondary">📝 Unterschriftenblatt</button>
         <button id="lockNowBtn" class="secondary">Jetzt sperren</button>
       </div>
     </div>
@@ -1975,6 +2015,9 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
   document.getElementById("openAbgabeBtn").onclick = () => showAbgabeView({ onLock });
   document.getElementById("openNachbestellBtn").onclick = () => showNachbestellungView({ onLock });
   document.getElementById("openKilometerBtn").onclick = () => showKilometerView({ onLock });
+  document.getElementById("openUnterschriftenblattBtn").onclick = () => {
+    window.open("./vorlagen/unterschriftenblatt.pdf", "_blank");
+  };
   document.getElementById("lockNowBtn").onclick = onLock;
 
   document.getElementById("openZeitraumAuswertungFromOverviewBtn").onclick = () => showZeitraumAuswertungView({ onLock });
@@ -3996,6 +4039,10 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
   const overview = getKilometerOverview();
   const pointOptions = getKilometerPointOptions();
   const summary = getKilometerPeriodSummary(summaryFrom, summaryTo);
+  const therapistName = getRuntimeData()?.settings?.therapistName || "";
+  const kmExports = [...(overview.kmExports || [])].sort((a, b) =>
+    String(b?.erstelltAm || "").localeCompare(String(a?.erstelltAm || ""), 'de')
+  );
 
   const travelLog = [...(overview.travelLog || [])].sort((a, b) =>
     compareDeDates(String(b?.date || ""), String(a?.date || ""))
@@ -4172,6 +4219,30 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
         `).join("")}
       </div>
     </details>
+
+    <details class="accordion">
+      <summary>
+        <span>Kilometerzettel-Historie</span>
+        <span class="muted">${escapeHtml(String(kmExports.length))}</span>
+      </summary>
+      <div class="accordion-body">
+        ${kmExports.length === 0 ? `<p class="muted">Noch keine abgeschlossenen Kilometerzettel.</p>` : ""}
+        ${kmExports.map((item) => `
+          <div class="compact-card">
+            <div style="font-weight:600;">Nr. ${escapeHtml(item.number || "—")}</div>
+            <div class="compact-meta">
+              Zeitraum: ${escapeHtml(item.von || "—")} bis ${escapeHtml(item.bis || "—")}<br>
+              Erstellt: ${escapeHtml(formatIsoDateShort(item.erstelltAm))}<br>
+              ${escapeHtml(formatKm(item.gesamtKm))} · ${escapeHtml(formatEuro(item.gesamtVerguetung))}
+            </div>
+            <div class="row" style="margin-top:10px;">
+              <button class="secondary km-history-open-btn" data-history-id="${escapeHtml(item.id)}">Öffnen</button>
+              <button class="secondary km-history-print-btn" data-history-id="${escapeHtml(item.id)}">Drucken</button>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    </details>
   `);
 
   bindSelectableCardChecks(app);
@@ -4244,44 +4315,21 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
       return;
     }
 
-    printHtml(
-      "Kilometerzettel",
-      `
-        <div class="row"><strong>Zeitraum:</strong> ${escapeHtml(fromValue || "—")} bis ${escapeHtml(toValue || "—")}</div>
-        <table>
-          <thead>
-            <tr>
-              <th>Datum</th>
-              <th>Von</th>
-              <th>Nach</th>
-              <th class="numeric">Kilometer</th>
-              <th class="numeric">Wert</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${currentSummary.rows.map((item) => `
-              <tr>
-                <td>${escapeHtml(item.date || "—")}</td>
-                <td>${escapeHtml(item.fromLabel || "—")}</td>
-                <td>${escapeHtml(item.toLabel || "—")}</td>
-                <td class="numeric">${escapeHtml(formatKm(item.km || 0))}</td>
-                <td class="numeric">${escapeHtml(formatEuro((Number(item.km) || 0) * 0.3))}</td>
-              </tr>
-            `).join("")}
-          </tbody>
-          <tfoot>
-            <tr>
-              <td colspan="3">Summe</td>
-              <td class="numeric">${escapeHtml(formatKm(currentSummary.totalKm))}</td>
-              <td class="numeric">${escapeHtml(formatEuro(currentSummary.totalAmount))}</td>
-            </tr>
-          </tfoot>
-        </table>
-      `
-    );
+    const nextNumber = previewNextKilometerZettelNumber();
+    const zettelHtml = buildKilometerZettelHtml({
+      number: nextNumber,
+      therapistName,
+      fromDate: fromValue || currentSummary.rows[0]?.date,
+      toDate: toValue || currentSummary.rows[currentSummary.rows.length - 1]?.date,
+      rows: currentSummary.rows,
+      totalKm: currentSummary.totalKm,
+      totalAmount: currentSummary.totalAmount
+    });
+
+    openHtmlDocument(`FaSt Kilometer ${nextNumber}`, zettelHtml, { autoPrint: true });
 
     try {
-      finalizeKilometerExport(fromValue, toValue);
+      finalizeKilometerExport(fromValue, toValue, { snapshotHtml: zettelHtml, number: nextNumber });
       await queuePersistRuntimeData();
       showKilometerView({ onLock, summaryFrom: fromValue, summaryTo: toValue });
     } catch (err) {
@@ -4289,6 +4337,22 @@ export function showKilometerView({ onLock, summaryFrom = "", summaryTo = "", ed
       alert(err?.message || "Kilometerzettel konnte nicht abgeschlossen werden.");
     }
   };
+
+  document.querySelectorAll(".km-history-open-btn").forEach((btn) => {
+    btn.onclick = () => {
+      const item = kmExports.find((entry) => entry.id === btn.dataset.historyId);
+      if (!item?.snapshotHtml) return;
+      openLetterPreview(`FaSt Kilometer ${item.number || ''}`.trim(), item.snapshotHtml);
+    };
+  });
+
+  document.querySelectorAll(".km-history-print-btn").forEach((btn) => {
+    btn.onclick = () => {
+      const item = kmExports.find((entry) => entry.id === btn.dataset.historyId);
+      if (!item?.snapshotHtml) return;
+      openHtmlDocument(`FaSt Kilometer ${item.number || ''}`.trim(), item.snapshotHtml, { autoPrint: true });
+    };
+  });
 
   document.getElementById("saveManualKmBtn").onclick = async () => {
     const msg = document.getElementById("manualKmMsg");

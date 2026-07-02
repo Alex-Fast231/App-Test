@@ -1,6 +1,6 @@
 // Bei jeder inhaltlichen Änderung der App diese Versionsnummer erhöhen.
 // Das ist der einzige verlässliche Trigger, damit Chrome ein Update erkennt.
-const SW_VERSION = "v3.24.0";
+const SW_VERSION = "v3.26.0";
 const CACHE_NAME = `fast-doku-shell-${SW_VERSION}`;
 
 const FILES = [
@@ -27,7 +27,8 @@ const FILES = [
   "./modules/homes.js",
   "./ui/views.js",
   "./icons/icon-192.png",
-  "./icons/icon-512.png"
+  "./icons/icon-512.png",
+  "./vorlagen/unterschriftenblatt.pdf"
 ];
 
 self.addEventListener("install", (event) => {

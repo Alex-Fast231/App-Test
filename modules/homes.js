@@ -412,6 +412,13 @@ export function getKilometerPointOptions() {
   return collectKilometerPoints(data);
 }
 
+export function previewNextKilometerZettelNumber() {
+  const data = getRuntimeData();
+  if (!data) throw new Error('Kein runtimeData Zustand vorhanden');
+  const kilometerState = ensureKilometerState(data);
+  return getNextKilometerZettelNumber(kilometerState, new Date().getFullYear());
+}
+
 export function addManualKilometerTravel(payload) {
   mutateRuntimeData((data) => {
     const kilometerState = ensureKilometerState(data);
@@ -551,7 +558,19 @@ export function getKilometerPeriodSummary(fromDate, toDate) {
   };
 }
 
-export function finalizeKilometerExport(fromDate, toDate) {
+function getNextKilometerZettelNumber(kilometerState, year) {
+  const prefix = `${year}-`;
+  const existingNumbers = (kilometerState.kmExports || [])
+    .map((item) => String(item.number || ''))
+    .filter((num) => num.startsWith(prefix))
+    .map((num) => Number(num.slice(prefix.length)))
+    .filter((num) => Number.isFinite(num));
+
+  const nextNumber = existingNumbers.length > 0 ? Math.max(...existingNumbers) + 1 : 1;
+  return `${prefix}${String(nextNumber).padStart(3, '0')}`;
+}
+
+export function finalizeKilometerExport(fromDate, toDate, { snapshotHtml = '', number = '' } = {}) {
   return mutateRuntimeData((data) => {
     const kilometerState = ensureKilometerState(data);
     const now = new Date().toISOString();
@@ -570,6 +589,8 @@ export function finalizeKilometerExport(fromDate, toDate) {
     const firstDate = rows[0]?.date || String(fromDate || '').trim();
     const lastDate = rows[rows.length - 1]?.date || String(toDate || '').trim();
     const fahrtIds = rows.map((item) => String(item.travelId || '')).filter(Boolean);
+    const currentYear = new Date().getFullYear();
+    const zettelNumber = String(number || '').trim() || getNextKilometerZettelNumber(kilometerState, currentYear);
 
     rows.forEach((item) => {
       item.abgerechnet = true;
@@ -580,6 +601,8 @@ export function finalizeKilometerExport(fromDate, toDate) {
 
     const exportItem = {
       id: exportId,
+      number: zettelNumber,
+      therapistName: String(data?.settings?.therapistName || '').trim(),
       von: String(fromDate || '').trim() || firstDate,
       bis: String(toDate || '').trim() || lastDate,
       erstesFahrtdatum: firstDate,
@@ -587,7 +610,8 @@ export function finalizeKilometerExport(fromDate, toDate) {
       erstelltAm: now,
       gesamtKm: totalKm,
       gesamtVerguetung: totalAmount,
-      fahrtIds
+      fahrtIds,
+      snapshotHtml: String(snapshotHtml || '')
     };
 
     kilometerState.kmExports.push(exportItem);

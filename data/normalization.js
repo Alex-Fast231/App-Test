@@ -253,6 +253,8 @@ function normalizeKilometerState(state) {
     })),
     kmExports: ensureArray(source.kmExports).map((item) => ({
       id: ensureString(item?.id) || generateId("kmexport"),
+      number: ensureString(item?.number),
+      therapistName: ensureString(item?.therapistName),
       von: ensureDeDateString(item?.von),
       bis: ensureDeDateString(item?.bis),
       erstesFahrtdatum: ensureDeDateString(item?.erstesFahrtdatum),
@@ -260,7 +262,8 @@ function normalizeKilometerState(state) {
       erstelltAm: ensureIsoString(item?.erstelltAm, new Date().toISOString()),
       gesamtKm: Number.isFinite(Number(item?.gesamtKm)) ? Number(item.gesamtKm) : 0,
       gesamtVerguetung: Number.isFinite(Number(item?.gesamtVerguetung)) ? Number(item.gesamtVerguetung) : 0,
-      fahrtIds: ensureArray(item?.fahrtIds).map((id) => ensureString(id)).filter(Boolean)
+      fahrtIds: ensureArray(item?.fahrtIds).map((id) => ensureString(id)).filter(Boolean),
+      snapshotHtml: ensureString(item?.snapshotHtml)
     }))
   };
 }
