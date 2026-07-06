@@ -4810,6 +4810,7 @@ export function showStundenkontoView({
 
       <button id="runStundenkontoBtn" style="margin-top:16px;">Auswertung anzeigen</button>
 
+      ${timeSummaryFrom || timeSummaryTo ? `
       <div class="compact-card" style="margin-top:16px; padding:16px;">
         <div style="font-size:18px; font-weight:700; margin-bottom:12px;">Zeitsaldo</div>
 
@@ -4828,6 +4829,7 @@ export function showStundenkontoView({
           </div>
         </div>
       </div>
+      ` : `<p class="muted" style="margin-top:16px;">Zeitraum eingeben und "Auswertung anzeigen" tippen.</p>`}
     </div>
 
     <div class="card">
@@ -5283,7 +5285,7 @@ export function showPatientensucheView({ onLock, query = "" } = {}) {
   });
 }
 
-export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedPatientId = null, selectedRezeptId = null, successMsg = "" } = {}) {
+export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedPatientId = null, selectedRezeptId = null, successMsg = "", scrollTo = 0 } = {}) {
   bindLockButton(onLock);
 
   const runtimeData = getRuntimeData();
@@ -5367,6 +5369,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       setCurrentView("zeiterfassung", { selectedHomeId: null, selectedPatientId: null, selectedRezeptId: null });
       showZeiterfassungView({ onLock });
     };
+    if (scrollTo > 0) window.scrollTo(0, scrollTo);
     return;
   }
 
@@ -5513,12 +5516,14 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
             createdAt: new Date().toISOString()
           });
         });
+        const scrollPosition = window.scrollY;
         await queuePersistRuntimeData();
 
         showZeiterfassungView({
           onLock,
           selectedHomeId,
-          successMsg: `✓ ${autoMin} Min für ${patientName} am ${normalizedDatum} gebucht`
+          successMsg: `✓ ${autoMin} Min für ${patientName} am ${normalizedDatum} gebucht`,
+          scrollTo: scrollPosition
         });
       } catch (err) {
         msg.textContent = "Fehler beim Speichern: " + err.message;
