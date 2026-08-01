@@ -1882,7 +1882,6 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
           <div class="compact-meta" style="margin-top:6px;">Aktuelle Zeit · Heute</div>
         </div>
         <div class="row" style="margin-top:10px;">
-          <button id="openZeitraumAuswertungFromOverviewBtn" class="secondary">📅 Zeitraum-Auswertung</button>
           <button id="openStundenkontoFromOverviewBtn" class="secondary">📊 Stundenkonto</button>
         </div>
         <details class="accordion" style="margin-top:10px;" ${keepOverviewOpen ? 'open' : ''}>
@@ -1957,11 +1956,7 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
       <h3>Bereiche</h3>
       <div class="row">
         <button id="openZeiterfassungBtn">⏱ Zeiterfassung</button>
-        <button id="openZeitraumAuswertungBtn" class="secondary">📅 Zeitraum-Auswertung</button>
-      </div>
-      <div class="row">
         <button id="openStundenkontoBtn" class="secondary">📊 Stundenkonto</button>
-        <button id="openPatientensucheBtn" class="secondary">🔍 Patienten-Suche</button>
       </div>
       <div class="row">
         <button id="openHomesBtn" class="secondary">Einrichtungen</button>
@@ -1973,7 +1968,7 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
       </div>
       <div class="row">
         <button id="openUnterschriftenblattBtn" class="secondary">📝 Unterschriftenblatt</button>
-        <button id="lockNowBtn" class="secondary">Jetzt sperren</button>
+        <button id="openSupportBtn" class="secondary">🆘 Support</button>
       </div>
     </div>
 
@@ -2008,9 +2003,7 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
 
   document.getElementById("openSettingsBtn").onclick = () => showSettingsView({ onLock });
   document.getElementById("openZeiterfassungBtn").onclick = () => showZeiterfassungView({ onLock });
-  document.getElementById("openZeitraumAuswertungBtn").onclick = () => showZeitraumAuswertungView({ onLock });
   document.getElementById("openStundenkontoBtn").onclick = () => showStundenkontoView({ onLock });
-  document.getElementById("openPatientensucheBtn").onclick = () => showPatientensucheView({ onLock });
   document.getElementById("openHomesBtn").onclick = () => showHomesView({ onLock });
   document.getElementById("openAbgabeBtn").onclick = () => showAbgabeView({ onLock });
   document.getElementById("openNachbestellBtn").onclick = () => showNachbestellungView({ onLock });
@@ -2018,9 +2011,10 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
   document.getElementById("openUnterschriftenblattBtn").onclick = () => {
     window.open("./vorlagen/unterschriftenblatt.pdf", "_blank");
   };
-  document.getElementById("lockNowBtn").onclick = onLock;
+  document.getElementById("openSupportBtn").onclick = () => {
+    window.open("https://www.physio-fast.de/support", "_blank");
+  };
 
-  document.getElementById("openZeitraumAuswertungFromOverviewBtn").onclick = () => showZeitraumAuswertungView({ onLock });
   document.getElementById("openStundenkontoFromOverviewBtn").onclick = () => showStundenkontoView({ onLock });
 
   document.querySelectorAll('.delete-dashboard-time-entry-btn').forEach((button) => {
@@ -4562,35 +4556,48 @@ function escapeHtml(value) {
 // ZEITERFASSUNG – Phase 2
 // ─────────────────────────────────────────────
 
-export function showZeitraumAuswertungView({
+export function showStundenkontoView({
   onLock,
   calYear = null,
   calMonth = null,
   rangeStart = "",
   rangeEnd = "",
-  pendingStart = ""
+  pendingStart = "",
+  timeSummaryFrom = "",
+  timeSummaryTo = "",
+  showAbsenceForm = false,
+  showHolidayForm = false,
+  showAbgleichForm = false,
+  msgText = ""
 } = {}) {
   bindLockButton(onLock);
-  setCurrentView("zeitraum-auswertung", { calYear, calMonth, rangeStart, rangeEnd, pendingStart });
-
-  const today = new Date();
-  today.setHours(12, 0, 0, 0);
-  const year = calYear || today.getFullYear();
-  const month = calMonth || (today.getMonth() + 1);
-  const todayComparable = getComparableFromDate(today);
-
-  const grid = buildCalendarMonthGrid(year, month);
-  const weekDayLabels = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+  setCurrentView("stundenkonto", { calYear, calMonth, rangeStart, rangeEnd, pendingStart, timeSummaryFrom, timeSummaryTo, showAbsenceForm, showHolidayForm, showAbgleichForm });
 
   const runtimeData = getRuntimeData();
+  const timePeriodSummary = getTimePeriodSummary(runtimeData, timeSummaryFrom, timeSummaryTo);
+  const absenceRows = timePeriodSummary.absenceRows;
+  const specialDayRows = timePeriodSummary.specialDayRows;
+  const stundenAbgleichRows = timePeriodSummary.stundenAbgleichRows || [];
+
+  // Kalender-Daten für Zeitraum-Auswahl
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+  const calYearResolved = calYear || today.getFullYear();
+  const calMonthResolved = calMonth || (today.getMonth() + 1);
+  const todayComparable = getComparableFromDate(today);
+  const grid = buildCalendarMonthGrid(calYearResolved, calMonthResolved);
+  const weekDayLabels = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
   const hasRange = Boolean(rangeStart && rangeEnd);
   const fromDe = rangeStart ? formatDeDate(rangeStart) : '';
   const toDe = rangeEnd ? formatDeDate(rangeEnd) : '';
 
+  // Wenn Kalenderbereich gewählt → in Datum-Felder übernehmen
+  const effectiveFrom = hasRange ? fromDe : timeSummaryFrom;
+  const effectiveTo = hasRange ? toDe : timeSummaryTo;
+
+  // Patienten-Liste im gewählten Zeitraum
   const patientsInRange = hasRange ? getPatientsInDateRange(runtimeData, fromDe, toDe) : [];
   const totalMinutesInRange = patientsInRange.reduce((sum, row) => sum + row.totalMinutes, 0);
-
-  // Tagesgruppen für die Anzeige, falls mehrere Tage im Zeitraum liegen
   const groupedByDate = new Map();
   patientsInRange.forEach((row) => {
     if (!groupedByDate.has(row.date)) groupedByDate.set(row.date, []);
@@ -4600,8 +4607,8 @@ export function showZeitraumAuswertungView({
 
   render(`
     <div class="card">
-      <h2>Zeitraum-Auswertung</h2>
-      <button id="zeitraumBackDashboardBtn" class="secondary">Zurück zum Dashboard</button>
+      <h2>Stundenkonto</h2>
+      <button id="stundenkontoBackDashboardBtn" class="secondary">Zurück zum Dashboard</button>
     </div>
 
     <div class="card">
@@ -4616,7 +4623,7 @@ export function showZeitraumAuswertungView({
 
       <div style="display:flex; align-items:center; justify-content:space-between; margin-top:18px;">
         <button id="calPrevMonthBtn" class="secondary" style="width:auto; margin-top:0; padding:8px 14px;">‹</button>
-        <div style="font-weight:700; font-size:16px;">${escapeHtml(getMonthLabelDe(year, month))}</div>
+        <div style="font-weight:700; font-size:16px;">${escapeHtml(getMonthLabelDe(calYearResolved, calMonthResolved))}</div>
         <button id="calNextMonthBtn" class="secondary" style="width:auto; margin-top:0; padding:8px 14px;">›</button>
       </div>
 
@@ -4698,115 +4705,13 @@ export function showZeitraumAuswertungView({
         }
       </div>
     ` : ''}
-  `);
-
-  document.getElementById("zeitraumBackDashboardBtn").onclick = () => {
-    setCurrentView("dashboard", {});
-    showDashboardView({ onLock });
-  };
-
-  document.getElementById("calPrevMonthBtn").onclick = () => {
-    const prev = shiftMonth(year, month, -1);
-    showZeitraumAuswertungView({ onLock, calYear: prev.year, calMonth: prev.month, rangeStart, rangeEnd, pendingStart });
-  };
-  document.getElementById("calNextMonthBtn").onclick = () => {
-    const next = shiftMonth(year, month, 1);
-    showZeitraumAuswertungView({ onLock, calYear: next.year, calMonth: next.month, rangeStart, rangeEnd, pendingStart });
-  };
-
-  document.querySelectorAll(".cal-day-btn").forEach((btn) => {
-    btn.onclick = () => {
-      const clickedDate = btn.dataset.date;
-
-      if (!pendingStart) {
-        // Erster Klick: Start setzen, noch kein fertiger Bereich
-        showZeitraumAuswertungView({ onLock, calYear: year, calMonth: month, rangeStart: "", rangeEnd: "", pendingStart: clickedDate });
-        return;
-      }
-
-      // Zweiter Klick: Bereich fertigstellen (unabhängig von der Klick-Reihenfolge)
-      const start = clickedDate < pendingStart ? clickedDate : pendingStart;
-      const end = clickedDate < pendingStart ? pendingStart : clickedDate;
-      showZeitraumAuswertungView({ onLock, calYear: year, calMonth: month, rangeStart: start, rangeEnd: end, pendingStart: "" });
-    };
-  });
-
-  const clearBtn = document.getElementById("clearRangeBtn");
-  if (clearBtn) {
-    clearBtn.onclick = () => {
-      showZeitraumAuswertungView({ onLock, calYear: year, calMonth: month, rangeStart: "", rangeEnd: "", pendingStart: "" });
-    };
-  }
-
-  document.getElementById("quickThisWeekBtn").onclick = () => {
-    const range = getQuickRangeDates('thisWeek');
-    const refDate = parseComparableDate(range.from);
-    showZeitraumAuswertungView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "" });
-  };
-  document.getElementById("quickLastWeekBtn").onclick = () => {
-    const range = getQuickRangeDates('lastWeek');
-    const refDate = parseComparableDate(range.from);
-    showZeitraumAuswertungView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "" });
-  };
-  document.getElementById("quickThisMonthBtn").onclick = () => {
-    const range = getQuickRangeDates('thisMonth');
-    const refDate = parseComparableDate(range.from);
-    showZeitraumAuswertungView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "" });
-  };
-  document.getElementById("quickLastMonthBtn").onclick = () => {
-    const range = getQuickRangeDates('lastMonth');
-    const refDate = parseComparableDate(range.from);
-    showZeitraumAuswertungView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "" });
-  };
-
-  document.querySelectorAll(".delete-zeitraum-entry-btn").forEach((btn) => {
-    btn.onclick = async () => {
-      const { homeId, patientId, rezeptId, timeEntryId } = btn.dataset;
-      if (!homeId || !patientId || !rezeptId || !timeEntryId) return;
-      if (!confirm("Diesen Zeiteintrag wirklich löschen?")) return;
-
-      try {
-        deleteRezeptTimeEntry(homeId, patientId, rezeptId, timeEntryId);
-        await queuePersistRuntimeData();
-        showZeitraumAuswertungView({ onLock, calYear: year, calMonth: month, rangeStart, rangeEnd, pendingStart });
-      } catch (err) {
-        console.error(err);
-        alert(err?.message || "Zeiteintrag konnte nicht gelöscht werden.");
-      }
-    };
-  });
-}
-
-export function showStundenkontoView({
-  onLock,
-  timeSummaryFrom = "",
-  timeSummaryTo = "",
-  showAbsenceForm = false,
-  showHolidayForm = false,
-  showAbgleichForm = false,
-  msgText = ""
-} = {}) {
-  bindLockButton(onLock);
-  setCurrentView("stundenkonto", { timeSummaryFrom, timeSummaryTo, showAbsenceForm, showHolidayForm, showAbgleichForm });
-
-  const runtimeData = getRuntimeData();
-  const timePeriodSummary = getTimePeriodSummary(runtimeData, timeSummaryFrom, timeSummaryTo);
-  const absenceRows = timePeriodSummary.absenceRows;
-  const specialDayRows = timePeriodSummary.specialDayRows;
-  const stundenAbgleichRows = timePeriodSummary.stundenAbgleichRows || [];
-
-  render(`
-    <div class="card">
-      <h2>Stundenkonto</h2>
-      <button id="stundenkontoBackDashboardBtn" class="secondary">Zurück zum Dashboard</button>
-    </div>
 
     <div class="card">
       <label for="stundenkontoFrom">Von</label>
-      <input id="stundenkontoFrom" type="text" value="${escapeHtml(timeSummaryFrom)}" placeholder="TT.MM.JJJJ" inputmode="numeric">
+      <input id="stundenkontoFrom" type="text" value="${escapeHtml(effectiveFrom)}" placeholder="TT.MM.JJJJ" inputmode="numeric">
 
       <label for="stundenkontoTo">Bis</label>
-      <input id="stundenkontoTo" type="text" value="${escapeHtml(timeSummaryTo)}" placeholder="TT.MM.JJJJ" inputmode="numeric">
+      <input id="stundenkontoTo" type="text" value="${escapeHtml(effectiveTo)}" placeholder="TT.MM.JJJJ" inputmode="numeric">
 
       <button id="runStundenkontoBtn" style="margin-top:16px;">Auswertung anzeigen</button>
 
@@ -4954,10 +4859,76 @@ export function showStundenkontoView({
     showDashboardView({ onLock });
   };
 
+  document.getElementById("calPrevMonthBtn").onclick = () => {
+    const prev = shiftMonth(calYearResolved, calMonthResolved, -1);
+    showStundenkontoView({ onLock, calYear: prev.year, calMonth: prev.month, rangeStart, rangeEnd, pendingStart, timeSummaryFrom, timeSummaryTo });
+  };
+  document.getElementById("calNextMonthBtn").onclick = () => {
+    const next = shiftMonth(calYearResolved, calMonthResolved, 1);
+    showStundenkontoView({ onLock, calYear: next.year, calMonth: next.month, rangeStart, rangeEnd, pendingStart, timeSummaryFrom, timeSummaryTo });
+  };
+
+  document.querySelectorAll(".cal-day-btn").forEach((btn) => {
+    btn.onclick = () => {
+      const clickedDate = btn.dataset.date;
+      if (!pendingStart) {
+        showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart: "", rangeEnd: "", pendingStart: clickedDate, timeSummaryFrom, timeSummaryTo });
+        return;
+      }
+      const start = clickedDate < pendingStart ? clickedDate : pendingStart;
+      const end = clickedDate < pendingStart ? pendingStart : clickedDate;
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart: start, rangeEnd: end, pendingStart: "", timeSummaryFrom, timeSummaryTo });
+    };
+  });
+
+  const clearBtn = document.getElementById("clearRangeBtn");
+  if (clearBtn) {
+    clearBtn.onclick = () => {
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart: "", rangeEnd: "", pendingStart: "", timeSummaryFrom, timeSummaryTo });
+    };
+  }
+
+  document.getElementById("quickThisWeekBtn").onclick = () => {
+    const range = getQuickRangeDates('thisWeek');
+    const refDate = parseComparableDate(range.from);
+    showStundenkontoView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "", timeSummaryFrom, timeSummaryTo });
+  };
+  document.getElementById("quickLastWeekBtn").onclick = () => {
+    const range = getQuickRangeDates('lastWeek');
+    const refDate = parseComparableDate(range.from);
+    showStundenkontoView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "", timeSummaryFrom, timeSummaryTo });
+  };
+  document.getElementById("quickThisMonthBtn").onclick = () => {
+    const range = getQuickRangeDates('thisMonth');
+    const refDate = parseComparableDate(range.from);
+    showStundenkontoView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "", timeSummaryFrom, timeSummaryTo });
+  };
+  document.getElementById("quickLastMonthBtn").onclick = () => {
+    const range = getQuickRangeDates('lastMonth');
+    const refDate = parseComparableDate(range.from);
+    showStundenkontoView({ onLock, calYear: refDate.getFullYear(), calMonth: refDate.getMonth() + 1, rangeStart: range.from, rangeEnd: range.to, pendingStart: "", timeSummaryFrom, timeSummaryTo });
+  };
+
+  document.querySelectorAll(".delete-zeitraum-entry-btn").forEach((btn) => {
+    btn.onclick = async () => {
+      const { homeId, patientId, rezeptId, timeEntryId } = btn.dataset;
+      if (!homeId || !patientId || !rezeptId || !timeEntryId) return;
+      if (!confirm("Diesen Zeiteintrag wirklich löschen?")) return;
+      try {
+        deleteRezeptTimeEntry(homeId, patientId, rezeptId, timeEntryId);
+        await queuePersistRuntimeData();
+        showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom, timeSummaryTo });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || "Zeiteintrag konnte nicht gelöscht werden.");
+      }
+    };
+  });
+
   document.getElementById("runStundenkontoBtn").onclick = () => {
     const fromValue = document.getElementById("stundenkontoFrom").value.trim();
     const toValue = document.getElementById("stundenkontoTo").value.trim();
-    showStundenkontoView({ onLock, timeSummaryFrom: fromValue, timeSummaryTo: toValue });
+    showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: fromValue, timeSummaryTo: toValue });
   };
 
   function currentFromTo() {
@@ -4971,14 +4942,14 @@ export function showStundenkontoView({
   if (openAbsenceFormBtn) {
     openAbsenceFormBtn.onclick = () => {
       const { from, to } = currentFromTo();
-      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbsenceForm: true });
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to, showAbsenceForm: true });
     };
   }
   const cancelAbsenceFormBtn = document.getElementById("cancelAbsenceFormBtn");
   if (cancelAbsenceFormBtn) {
     cancelAbsenceFormBtn.onclick = () => {
       const { from, to } = currentFromTo();
-      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbsenceForm: false });
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to, showAbsenceForm: false });
     };
   }
 
@@ -5013,7 +4984,7 @@ export function showStundenkontoView({
       });
       await queuePersistRuntimeData();
       const { from, to } = currentFromTo();
-      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbsenceForm: false });
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to, showAbsenceForm: false });
     } catch (err) {
       console.error(err);
       msg.textContent = err?.message || "Eintrag konnte nicht gespeichert werden.";
@@ -5029,14 +5000,14 @@ export function showStundenkontoView({
   if (openHolidayFormBtn) {
     openHolidayFormBtn.onclick = () => {
       const { from, to } = currentFromTo();
-      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showHolidayForm: true });
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to, showHolidayForm: true });
     };
   }
   const cancelHolidayFormBtn = document.getElementById("cancelHolidayFormBtn");
   if (cancelHolidayFormBtn) {
     cancelHolidayFormBtn.onclick = () => {
       const { from, to } = currentFromTo();
-      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showHolidayForm: false });
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to, showHolidayForm: false });
     };
   }
   const saveHolidayBtn = document.getElementById("saveHolidayBtn");
@@ -5076,7 +5047,7 @@ export function showStundenkontoView({
         });
         await queuePersistRuntimeData();
         const { from, to } = currentFromTo();
-        showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showHolidayForm: false });
+        showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to, showHolidayForm: false });
       } catch (err) {
         console.error(err);
         msg.textContent = err?.message || "Feiertag konnte nicht gespeichert werden.";
@@ -5088,14 +5059,14 @@ export function showStundenkontoView({
   if (openAbgleichFormBtn) {
     openAbgleichFormBtn.onclick = () => {
       const { from, to } = currentFromTo();
-      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbgleichForm: true });
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to, showAbgleichForm: true });
     };
   }
   const cancelAbgleichFormBtn = document.getElementById("cancelAbgleichFormBtn");
   if (cancelAbgleichFormBtn) {
     cancelAbgleichFormBtn.onclick = () => {
       const { from, to } = currentFromTo();
-      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbgleichForm: false });
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to, showAbgleichForm: false });
     };
   }
   const saveAbgleichBtn = document.getElementById("saveAbgleichBtn");
@@ -5134,7 +5105,7 @@ export function showStundenkontoView({
         });
         await queuePersistRuntimeData();
         const { from, to } = currentFromTo();
-        showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to, showAbgleichForm: false });
+        showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to, showAbgleichForm: false });
       } catch (err) {
         console.error(err);
         msg.textContent = err?.message || "Abgleich konnte nicht gespeichert werden.";
@@ -5152,7 +5123,7 @@ export function showStundenkontoView({
       });
       await queuePersistRuntimeData();
       const { from, to } = currentFromTo();
-      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to });
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to });
     };
   });
 
@@ -5166,7 +5137,7 @@ export function showStundenkontoView({
       });
       await queuePersistRuntimeData();
       const { from, to } = currentFromTo();
-      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to });
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to });
     };
   });
 
@@ -5180,107 +5151,7 @@ export function showStundenkontoView({
       });
       await queuePersistRuntimeData();
       const { from, to } = currentFromTo();
-      showStundenkontoView({ onLock, timeSummaryFrom: from, timeSummaryTo: to });
-    };
-  });
-}
-
-export function showPatientensucheView({ onLock, query = "" } = {}) {
-  bindLockButton(onLock);
-  setCurrentView("patientensuche", { query });
-
-  const runtimeData = getRuntimeData();
-  const trimmedQuery = String(query || "").trim();
-  const results = trimmedQuery ? searchPatientsAcrossApp(runtimeData, trimmedQuery) : [];
-
-  render(`
-    <div class="card">
-      <h2>Patienten-Suche</h2>
-      <button id="patientensucheBackDashboardBtn" class="secondary">Zurück zum Dashboard</button>
-    </div>
-
-    <div class="card">
-      <label for="patientensucheInput">Patientenname</label>
-      <input id="patientensucheInput" type="text" value="${escapeHtml(trimmedQuery)}" placeholder="z. B. Müller">
-      <button id="patientensucheSearchBtn" style="margin-top:16px;">Suchen</button>
-      <p class="muted" style="margin-top:12px; margin-bottom:0;">Zeigt alle erfassten Zeiten dieses Patienten, über die gesamte Historie.</p>
-    </div>
-
-    ${trimmedQuery ? `
-      <div class="card">
-        <h3>Ergebnisse</h3>
-        ${results.length === 0
-          ? `<p class="muted">Kein Patient gefunden für "${escapeHtml(trimmedQuery)}".</p>`
-          : results.map(result => `
-              <details class="accordion">
-                <summary>
-                  <span>${escapeHtml(result.patientName)}</span>
-                  <span class="muted">${escapeHtml(formatHoursClockLabel(result.totalMinutes))}</span>
-                </summary>
-                <div class="accordion-body">
-                  <p class="compact-meta" style="margin-top:0;">${escapeHtml(result.homeName || '—')}</p>
-                  ${result.entries.length === 0
-                    ? `<p class="muted" style="margin:0;">Keine Zeiteinträge erfasst.</p>`
-                    : `<div class="list-stack">
-                        ${result.entries.map(entry => `
-                          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid var(--border);">
-                            <div style="min-width:0;">
-                              <div style="font-weight:600; font-size:15px;">${escapeHtml(entry.date || 'Ohne Datum')}</div>
-                              <div class="compact-meta">${escapeHtml(entry.rezeptLabel || '—')}</div>
-                              ${entry.note ? `<div class="compact-meta">${escapeHtml(entry.note)}</div>` : ''}
-                            </div>
-                            <div style="display:flex; align-items:center; gap:10px; flex-shrink:0;">
-                              <div style="font-weight:700; color:var(--primary); font-size:15px; white-space:nowrap;">${escapeHtml(formatMinutesLabel(entry.minutes))}</div>
-                              <button
-                                class="delete-patientensuche-entry-btn danger"
-                                style="padding:6px 10px; font-size:13px; white-space:nowrap;"
-                                data-home-id="${escapeHtml(entry.homeId)}"
-                                data-patient-id="${escapeHtml(entry.patientId)}"
-                                data-rezept-id="${escapeHtml(entry.rezeptId)}"
-                                data-time-entry-id="${escapeHtml(entry.timeEntryId)}"
-                              >Löschen</button>
-                            </div>
-                          </div>
-                        `).join('')}
-                      </div>`
-                  }
-                </div>
-              </details>
-            `).join('')
-        }
-      </div>
-    ` : ''}
-  `);
-
-  document.getElementById("patientensucheBackDashboardBtn").onclick = () => {
-    setCurrentView("dashboard", {});
-    showDashboardView({ onLock });
-  };
-
-  function runSearch() {
-    const value = document.getElementById("patientensucheInput").value.trim();
-    showPatientensucheView({ onLock, query: value });
-  }
-
-  document.getElementById("patientensucheSearchBtn").onclick = runSearch;
-  document.getElementById("patientensucheInput").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") runSearch();
-  });
-
-  document.querySelectorAll(".delete-patientensuche-entry-btn").forEach((btn) => {
-    btn.onclick = async () => {
-      const { homeId, patientId, rezeptId, timeEntryId } = btn.dataset;
-      if (!homeId || !patientId || !rezeptId || !timeEntryId) return;
-      if (!confirm("Diesen Zeiteintrag wirklich löschen?")) return;
-
-      try {
-        deleteRezeptTimeEntry(homeId, patientId, rezeptId, timeEntryId);
-        await queuePersistRuntimeData();
-        showPatientensucheView({ onLock, query: trimmedQuery });
-      } catch (err) {
-        console.error(err);
-        alert(err?.message || "Zeiteintrag konnte nicht gelöscht werden.");
-      }
+      showStundenkontoView({ onLock, calYear: calYearResolved, calMonth: calMonthResolved, rangeStart, rangeEnd, pendingStart, timeSummaryFrom: from, timeSummaryTo: to });
     };
   });
 }
