@@ -1955,19 +1955,19 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
     <div class="card">
       <h3>Bereiche</h3>
       <div class="row">
-        <button id="openZeiterfassungBtn">⏱ Zeiterfassung</button>
-        <button id="openHomesBtn" class="secondary">Einrichtungen</button>
+        <button id="openZeiterfassungBtn" style="margin-top:0;">⏱ Zeiterfassung</button>
+        <button id="openHomesBtn" class="secondary" style="margin-top:0;">Einrichtungen</button>
       </div>
-      <div class="row">
-        <button id="openAbgabeBtn" class="secondary">Abgabeliste</button>
-        <button id="openNachbestellBtn" class="secondary">Nachbestellung</button>
+      <div class="row" style="margin-top:12px;">
+        <button id="openAbgabeBtn" class="secondary" style="margin-top:0;">Abgabeliste</button>
+        <button id="openNachbestellBtn" class="secondary" style="margin-top:0;">Nachbestellung</button>
       </div>
-      <div class="row">
-        <button id="openKilometerBtn" class="secondary">Kilometer</button>
-        <button id="openUnterschriftenblattBtn" class="secondary">📝 Unterschriftenblatt</button>
+      <div class="row" style="margin-top:12px;">
+        <button id="openKilometerBtn" class="secondary" style="margin-top:0;">Kilometer</button>
+        <button id="openUnterschriftenblattBtn" class="secondary" style="margin-top:0;">Unterschriften</button>
       </div>
-      <div class="row">
-        <button id="openSupportBtn" class="secondary" style="flex:1;">🆘 Support</button>
+      <div class="row" style="margin-top:12px;">
+        <button id="openSupportBtn" class="secondary" style="margin-top:0; flex:1;">🆘 Support</button>
       </div>
     </div>
 
