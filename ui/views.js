@@ -1956,19 +1956,18 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
       <h3>Bereiche</h3>
       <div class="row">
         <button id="openZeiterfassungBtn">⏱ Zeiterfassung</button>
-        <button id="openStundenkontoBtn" class="secondary">📊 Stundenkonto</button>
-      </div>
-      <div class="row">
         <button id="openHomesBtn" class="secondary">Einrichtungen</button>
+      </div>
+      <div class="row">
         <button id="openAbgabeBtn" class="secondary">Abgabeliste</button>
-      </div>
-      <div class="row">
         <button id="openNachbestellBtn" class="secondary">Nachbestellung</button>
-        <button id="openKilometerBtn" class="secondary">Kilometer</button>
       </div>
       <div class="row">
+        <button id="openKilometerBtn" class="secondary">Kilometer</button>
         <button id="openUnterschriftenblattBtn" class="secondary">📝 Unterschriftenblatt</button>
-        <button id="openSupportBtn" class="secondary">🆘 Support</button>
+      </div>
+      <div class="row">
+        <button id="openSupportBtn" class="secondary" style="flex:1;">🆘 Support</button>
       </div>
     </div>
 
@@ -2003,7 +2002,6 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
 
   document.getElementById("openSettingsBtn").onclick = () => showSettingsView({ onLock });
   document.getElementById("openZeiterfassungBtn").onclick = () => showZeiterfassungView({ onLock });
-  document.getElementById("openStundenkontoBtn").onclick = () => showStundenkontoView({ onLock });
   document.getElementById("openHomesBtn").onclick = () => showHomesView({ onLock });
   document.getElementById("openAbgabeBtn").onclick = () => showAbgabeView({ onLock });
   document.getElementById("openNachbestellBtn").onclick = () => showNachbestellungView({ onLock });
