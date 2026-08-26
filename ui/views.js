@@ -1,4 +1,4 @@
-import { createEmptyAppData } from "../data/schema.js";
+import { createEmptyAppData, APP_VERSION } from "../data/schema.js";
 import { setupSecurity, unlockWithPIN } from "../security/auth.js";
 import { getRemainingLockoutMs } from "../security/lock.js";
 import {
@@ -64,11 +64,40 @@ import {
   deleteKilometerTravel,
   getKilometerPeriodSummary,
   finalizeKilometerExport,
-  previewNextKilometerZettelNumber
+  previewNextKilometerZettelNumber,
+  saveDiagnoseZuordnung,
+  deleteDiagnoseZuordnung,
+  setZuzahlungsstatus,
+  acknowledgeZuzahlungReminder,
+  getFaelligeZuzahlungErinnerungen,
+  createAbwesenheit,
+  getArztRegistry,
+  upsertArztAdresse,
+  saveFreikuvertBestellung,
+  scheduleAssessment,
+  saveAssessmentResult,
+  getFaelligeAssessmentErinnerungen
 } from "../modules/homes.js";
 import { getRezeptFristInfo } from "../modules/fristen.js";
+import { validateRezeptPflichtfelder } from "../modules/rezeptpruefung.js";
+import {
+  optimiereVerordnung,
+  resolveDiagnoseInput,
+  formatICD,
+  EMPFEHLUNG_ZU_ITEM_TYPE,
+  VERGUETUNG,
+  getDefaultLeitsymptomatik
+} from "../modules/rezeptoptimierung.js";
+import * as Assessment from "../modules/assessment.js";
+import * as AssessmentInfo from "../modules/assessmentInfo.js";
 import { exportBackup, importBackup, downloadBlob, validateBackupZip } from "../modules/backup.js";
-import { generateId } from "../core/utils.js";
+import {
+  buildBackupZip,
+  buildBackupReminderMailtoLink,
+  markBackupReminderHandled,
+  markBackupReminderPostponed
+} from "../modules/backupReminder.js";
+import { generateId, formatPatientName } from "../core/utils.js";
 import {
   normalizeDeDateInput,
   parseDeDate,
@@ -124,6 +153,7 @@ function renderRezeptMarkerLine(rezept, frist) {
     <div style="margin-bottom:8px;">
       ${rezept.bg ? `<span class="pill">BG</span>` : ""}
       ${rezept.dt ? `<span class="pill">DT</span>` : ""}
+      ${rezept.dringend ? `<span class="pill">Dringend</span>` : ""}
       ${blanko ? `<span class="pill">Blanko</span>` : ""}
       <span class="${trafficClass}">${escapeHtml(frist.statusText || "Frist")}</span>
     </div>
@@ -709,29 +739,26 @@ function getDocumentationOverviewRows(data, targetDate = "") {
   return rows.sort((a, b) => collatorDE.compare(a.patientName, b.patientName));
 }
 
-function getAllRezeptOptions(data) {
-  const rows = [];
-  (data?.homes || []).forEach((home) => {
-    (home?.patients || []).forEach((patient) => {
-      (patient?.rezepte || []).forEach((rezept) => {
-        rows.push({
-          value: `${home.homeId}__${patient.patientId}__${rezept.rezeptId}`,
-          label: `${patient.lastName || ""}, ${patient.firstName || ""}`.replace(/^,\s*/, "").trim() + ` · ${rezeptSummary(rezept)}`,
-          homeName: home?.name || ""
-        });
-      });
-    });
-  });
-  return rows.sort((a, b) => collatorDE.compare(a.label, b.label));
-}
-
 function bindCheckChipToggles(root = document) {
   root.querySelectorAll('.check-chip').forEach((chip) => {
-    const input = chip.querySelector('input[type="checkbox"]');
+    const input = chip.querySelector('input[type="checkbox"], input[type="radio"]');
     if (!input) return;
 
     const sync = () => {
       chip.classList.toggle('is-checked', !!input.checked);
+    };
+
+    // Bei Radios müssen auch die Geschwister-Chips (gleicher name) synchron
+    // gehalten werden, da nur ein Radio pro Gruppe "checked" sein kann.
+    const syncGroup = () => {
+      if (input.type === 'radio' && input.name) {
+        root.querySelectorAll(`input[type="radio"][name="${CSS.escape(input.name)}"]`).forEach((sibling) => {
+          const siblingChip = sibling.closest('.check-chip');
+          if (siblingChip) siblingChip.classList.toggle('is-checked', !!sibling.checked);
+        });
+      } else {
+        sync();
+      }
     };
 
     sync();
@@ -741,11 +768,15 @@ function bindCheckChipToggles(root = document) {
     chip.addEventListener('click', (event) => {
       if (event.target === input) return;
       event.preventDefault();
-      input.checked = !input.checked;
+      if (input.type === 'radio') {
+        input.checked = true;
+      } else {
+        input.checked = !input.checked;
+      }
       input.dispatchEvent(new Event('change', { bubbles: true }));
-      sync();
+      syncGroup();
     });
-    input.addEventListener('change', sync);
+    input.addEventListener('change', syncGroup);
   });
 }
 
@@ -1044,9 +1075,652 @@ function collectRezeptItemsFromForm() {
   })).filter((item) => item.type);
 }
 
+function renderJaNeinSelect(id, value) {
+  return `
+    <select id="${id}">
+      <option value="" ${value ? "" : "selected"}>Bitte wählen</option>
+      <option value="ja" ${value === "ja" ? "selected" : ""}>Ja</option>
+      <option value="nein" ${value === "nein" ? "selected" : ""}>Nein</option>
+    </select>
+  `;
+}
+
+const LEITSYMPTOMATIK_OPTIONEN = [
+  { val: "a", label: "a) Schädigung der Motorik", text: "a) Schädigung der Motorik (Bewegungs-, Koordinations- oder Kraftdefizit)" },
+  { val: "b", label: "b) Schädigung der Sensibilität", text: "b) Schädigung der Sensibilität / Wahrnehmung" },
+  { val: "c", label: "c) Sonstige Schädigung", text: "c) Schädigung sonstiger Art mit Auswirkung auf die Bewegungsfähigkeit" },
+  { val: "custom", label: "Patientenindividuell (Freitext)", text: "" }
+];
+
+// Leitsymptomatik wird intern weiterhin als ein einzelner String gespeichert
+// (Kompatibilität mit Rezeptprüfung/Anzeige/Export), bei Mehrfachauswahl
+// werden die Texte der ausgewählten Optionen mit "; " verbunden.
+function parseLeitsymptomatikSelection(value) {
+  const parts = String(value || "").split(";").map((p) => p.trim()).filter(Boolean);
+  const selectedVals = [];
+  const customParts = [];
+  parts.forEach((part) => {
+    const opt = LEITSYMPTOMATIK_OPTIONEN.find((o) => o.val !== "custom" && o.text === part);
+    if (opt) selectedVals.push(opt.val);
+    else customParts.push(part);
+  });
+  return { selectedVals, customText: customParts.join("; ") };
+}
+
+function renderLeitsymptomatikField(currentValue) {
+  const { selectedVals, customText } = parseLeitsymptomatikSelection(currentValue);
+  const selected = new Set(selectedVals);
+  return `
+    <label>Leitsymptomatik</label>
+    <p class="muted" style="margin-top:-4px;">Mehrfachauswahl möglich.</p>
+    <div class="checkbox-row checkbox-row-column">
+      ${LEITSYMPTOMATIK_OPTIONEN.filter((opt) => opt.val !== "custom").map((opt) => `
+        <label class="check-chip" style="justify-content:flex-start; margin-bottom:6px;">
+          <input type="checkbox" name="leitsymptomatikWahl" class="leitsymptomatikWahl" value="${escapeHtml(opt.val)}" ${selected.has(opt.val) ? "checked" : ""}>
+          <span>${escapeHtml(opt.label)}</span>
+        </label>
+      `).join("")}
+      <label class="check-chip" style="justify-content:flex-start; margin-bottom:6px;">
+        <input type="checkbox" id="leitsymptomatikCustomToggle" ${customText ? "checked" : ""}>
+        <span>Patientenindividuell (Freitext)</span>
+      </label>
+    </div>
+    <div id="leitsymptomatikCustomWrap" style="display:${customText ? "block" : "none"};">
+      <label for="leitsymptomatikCustom">Patientenindividuelle Leitsymptomatik</label>
+      <input id="leitsymptomatikCustom" type="text" placeholder="Freitext" value="${escapeHtml(customText)}">
+    </div>
+    <input id="leitsymptomatik" type="hidden" value="${escapeHtml(currentValue || "")}">
+  `;
+}
+
+function bindLeitsymptomatikField() {
+  bindCheckChipToggles(app);
+  const hidden = document.getElementById("leitsymptomatik");
+  const customWrap = document.getElementById("leitsymptomatikCustomWrap");
+  const customInput = document.getElementById("leitsymptomatikCustom");
+  const customToggle = document.getElementById("leitsymptomatikCustomToggle");
+
+  const applySelection = () => {
+    const parts = Array.from(document.querySelectorAll(".leitsymptomatikWahl:checked"))
+      .map((cb) => LEITSYMPTOMATIK_OPTIONEN.find((o) => o.val === cb.value)?.text)
+      .filter(Boolean);
+
+    if (customToggle.checked) {
+      customWrap.style.display = "block";
+      const customVal = customInput.value.trim();
+      if (customVal) parts.push(customVal);
+    } else {
+      customWrap.style.display = "none";
+    }
+
+    hidden.value = parts.join("; ");
+    hidden.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+
+  document.querySelectorAll(".leitsymptomatikWahl").forEach((cb) => {
+    cb.addEventListener("change", applySelection);
+  });
+  customToggle.addEventListener("change", applySelection);
+  customInput.addEventListener("input", applySelection);
+}
+
+function bindIcdAutoFormat(inputEl) {
+  if (!inputEl) return;
+  inputEl.addEventListener("input", () => {
+    const cursorAtEnd = inputEl.selectionEnd === inputEl.value.length;
+    inputEl.value = formatICD(inputEl.value);
+    if (cursorAtEnd) inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+  });
+}
+
+// Arztadresse wird im Register (data.aerzte) weiterhin als ein einzelner
+// String gespeichert (Kompatibilität mit Freikuvert-Versand u.a.), im
+// Rezept-Formular aber als Straße/PLZ/Ort getrennt erfasst und angezeigt
+// (u.a. für eine GKV-Muster-16-nahe Darstellung, siehe Aufgabe 9).
+function splitArztAdresse(adresse) {
+  const trimmed = String(adresse || "").trim();
+  if (!trimmed) return { strasse: "", plz: "", ort: "" };
+  const match = trimmed.match(/^(.*?),?\s*(\d{5})\s+(.+)$/);
+  if (match) {
+    return { strasse: match[1].trim(), plz: match[2], ort: match[3].trim() };
+  }
+  return { strasse: trimmed, plz: "", ort: "" };
+}
+
+function joinArztAdresse(strasse, plz, ort) {
+  const plzOrt = [String(plz || "").trim(), String(ort || "").trim()].filter(Boolean).join(" ");
+  return [String(strasse || "").trim(), plzOrt].filter(Boolean).join(", ");
+}
+
+function renderArztAdresseFields(adresse) {
+  const parts = splitArztAdresse(adresse);
+  return `
+    <label for="arztStrasse">Arztadresse (Straße, Hausnummer)</label>
+    <input id="arztStrasse" type="text" placeholder="z.B. Musterstraße 5" value="${escapeHtml(parts.strasse)}">
+    <div class="row">
+      <div style="flex:1;">
+        <label for="arztPlz">PLZ</label>
+        <input id="arztPlz" type="text" inputmode="numeric" maxlength="5" placeholder="12345" value="${escapeHtml(parts.plz)}">
+      </div>
+      <div style="flex:2;">
+        <label for="arztOrt">Ort</label>
+        <input id="arztOrt" type="text" placeholder="Musterstadt" value="${escapeHtml(parts.ort)}">
+      </div>
+    </div>
+  `;
+}
+
+// Füllt Straße/PLZ/Ort automatisch aus, sobald der eingegebene Arztname
+// exakt einem bereits gespeicherten Arzt entspricht, UND zeigt zusätzlich
+// ein eigenes Dropdown mit passenden Ärzten, sobald getippt wird. Ein
+// eigenes Dropdown statt (nur) der nativen <datalist> des Feldes, weil
+// natives Datalist-Verhalten auf mobilen Browsern (v.a. iOS Safari, auf
+// Tablets/Handys in der Praxis der Hauptanwendungsfall) unzuverlässig
+// bis gar nicht angezeigt wird.
+function bindArztAdresseAutofill(arztInput, arztRegistry) {
+  const strasseInput = document.getElementById("arztStrasse");
+  const plzInput = document.getElementById("arztPlz");
+  const ortInput = document.getElementById("arztOrt");
+
+  function fillAddressFor(name) {
+    const match = arztRegistry.find((a) => a.name === name);
+    const parts = splitArztAdresse(match?.adresse || "");
+    strasseInput.value = parts.strasse;
+    plzInput.value = parts.plz;
+    ortInput.value = parts.ort;
+  }
+
+  // position:fixed mit per Hand berechneten Koordinaten statt einer
+  // relativ positionierten Elternstruktur - so ist die Platzierung
+  // unabhängig davon, wo im Formular das Feld gerade steht, und muss
+  // nicht auf das umgebende Markup (z.B. eine .card mit Innenabstand)
+  // Rücksicht nehmen. Als Kind von #app statt document.body angehängt,
+  // damit render() (app.innerHTML = ...) es beim nächsten Rendern
+  // automatisch mit entfernt - sonst würde bei jedem erneuten Aufruf
+  // dieser Ansicht ein weiteres, verwaistes Dropdown-Element im DOM
+  // liegen bleiben.
+  const dropdown = document.createElement("div");
+  dropdown.className = "arzt-suggestion-dropdown";
+  dropdown.style.cssText = "position:fixed; z-index:200; background:var(--card); border:1px solid var(--border); border-radius:10px; max-height:220px; overflow-y:auto; display:none; box-shadow:0 6px 20px rgba(15,23,42,0.12);";
+  app.appendChild(dropdown);
+
+  // Klappt das Dropdown nach oben statt nach unten auf, wenn unterhalb
+  // des Eingabefelds nicht genug Platz im sichtbaren Bereich ist (z.B.
+  // Feld weit unten im Formular auf einem kleinen Bildschirm) - sonst
+  // würde das Dropdown teilweise oder ganz außerhalb des Viewports
+  // erscheinen und wäre nicht erreichbar (position:fixed folgt der
+  // Seite beim Scrollen nicht, ein Herunterscrollen würde es also nicht
+  // sichtbar machen).
+  const DROPDOWN_MAX_HEIGHT = 220;
+  function positionDropdown() {
+    const rect = arztInput.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+
+    dropdown.style.left = `${rect.left}px`;
+    dropdown.style.width = `${rect.width}px`;
+
+    if (spaceBelow < DROPDOWN_MAX_HEIGHT && rect.top > spaceBelow) {
+      dropdown.style.top = "";
+      dropdown.style.bottom = `${window.innerHeight - rect.top + 4}px`;
+    } else {
+      dropdown.style.bottom = "";
+      dropdown.style.top = `${rect.bottom + 4}px`;
+    }
+  }
+
+  function renderDropdown() {
+    const query = arztInput.value.trim().toLowerCase();
+    const matches = query ? arztRegistry.filter((a) => a.name.toLowerCase().includes(query)).slice(0, 8) : [];
+
+    if (matches.length === 0) {
+      dropdown.style.display = "none";
+      dropdown.innerHTML = "";
+      return;
+    }
+
+    positionDropdown();
+    dropdown.innerHTML = matches.map((a) => `
+      <div class="arzt-suggestion-item" data-name="${escapeHtml(a.name)}" style="padding:10px 12px; cursor:pointer; border-bottom:1px solid var(--border);">${escapeHtml(a.name)}</div>
+    `).join("");
+    dropdown.style.display = "block";
+
+    dropdown.querySelectorAll(".arzt-suggestion-item").forEach((el) => {
+      // mousedown statt click, damit preventDefault greift, bevor das
+      // Eingabefeld durch den Klick den Fokus verliert (blur würde das
+      // Dropdown sonst schon vor dem Klick-Handler schließen).
+      el.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const name = el.dataset.name;
+        arztInput.value = name;
+        fillAddressFor(name);
+        dropdown.style.display = "none";
+      });
+    });
+  }
+
+  arztInput.addEventListener("input", () => {
+    fillAddressFor(arztInput.value.trim());
+    renderDropdown();
+  });
+  arztInput.addEventListener("focus", renderDropdown);
+  arztInput.addEventListener("blur", () => {
+    setTimeout(() => { dropdown.style.display = "none"; }, 150);
+  });
+
+  // position:fixed folgt dem Eingabefeld nicht automatisch beim Scrollen
+  // eines umgebenden Containers (nur beim Scrollen des Viewports selbst) -
+  // auf einem langen Formular muss die Position deshalb bei jedem Scroll
+  // neu berechnet werden, sonst driftet das Dropdown vom Eingabefeld weg.
+  // Entfernt sich selbst wieder, sobald das Eingabefeld (nach dem nächsten
+  // render()) nicht mehr im DOM hängt - window-Listener werden sonst bei
+  // jedem erneuten Aufruf dieser Funktion dauerhaft angehäuft.
+  function onWindowScroll() {
+    if (!document.body.contains(arztInput)) {
+      window.removeEventListener("scroll", onWindowScroll, true);
+      return;
+    }
+    if (dropdown.style.display === "block") positionDropdown();
+  }
+  window.addEventListener("scroll", onWindowScroll, true);
+}
+
+function collectArztAdresseFromForm() {
+  return joinArztAdresse(
+    document.getElementById("arztStrasse").value,
+    document.getElementById("arztPlz").value,
+    document.getElementById("arztOrt").value
+  );
+}
+
+function renderZuzahlungsstatusSelect(id, value) {
+  return `
+    <select id="${id}">
+      <option value="" ${value ? "" : "selected"}>Nicht angegeben</option>
+      <option value="ja" ${value === "ja" ? "selected" : ""}>Ja, zuzahlungsbefreit</option>
+      <option value="nein" ${value === "nein" ? "selected" : ""}>Nein</option>
+      <option value="ungeklaert" ${value === "ungeklaert" ? "selected" : ""}>Noch nicht geklärt</option>
+    </select>
+  `;
+}
+
+// ============================================================
+// Assessment-Wizard – kleine Render-Helfer (siehe modules/assessment.js
+// für Testdefinitionen und Scoring)
+// ============================================================
+function renderRadioGroup(name, options, selected) {
+  return `
+    <div class="checkbox-row checkbox-row-column">
+      ${options.map((opt) => `
+        <label class="check-chip" style="justify-content:flex-start; margin-bottom:6px;">
+          <input type="radio" name="${name}" value="${escapeHtml(opt.val)}" ${String(selected) === String(opt.val) ? "checked" : ""}>
+          <span>${escapeHtml(opt.label)}</span>
+        </label>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderPointGroup(name, points, selected) {
+  return `
+    <div class="checkbox-row">
+      ${points.map((p) => `
+        <label class="check-chip">
+          <input type="radio" name="${name}" value="${p}" ${Number(selected) === p ? "checked" : ""}>
+          <span>${p}</span>
+        </label>
+      `).join("")}
+    </div>
+  `;
+}
+
+function getRadioValue(name) {
+  const el = document.querySelector(`input[name="${name}"]:checked`);
+  return el ? el.value : "";
+}
+
+function renderCheckboxList(namePrefix, options, selectedValues) {
+  const selected = new Set(selectedValues || []);
+  return `
+    <div class="checkbox-row checkbox-row-column">
+      ${options.map((opt, idx) => `
+        <label class="check-chip" style="justify-content:flex-start; margin-bottom:6px;">
+          <input type="checkbox" class="${namePrefix}-check" value="${escapeHtml(opt)}" ${selected.has(opt) ? "checked" : ""}>
+          <span>${escapeHtml(opt)}</span>
+        </label>
+      `).join("")}
+    </div>
+  `;
+}
+
+function getCheckboxListValues(namePrefix) {
+  return Array.from(document.querySelectorAll(`.${namePrefix}-check:checked`)).map((el) => el.value);
+}
+
+function renderRomJointRow(joint, current) {
+  return `
+    <div class="compact-card" style="margin-bottom:8px;">
+      <div style="font-weight:600; margin-bottom:6px;">${escapeHtml(joint.label)}</div>
+      ${joint.aufgabe ? `<div class="compact-meta" style="margin-bottom:8px;">${escapeHtml(joint.aufgabe)}</div>` : ""}
+      <div class="checkbox-row">
+        ${Assessment.ROM_BEWERTUNG_OPTIONEN.map((opt) => `
+          <label class="check-chip">
+            <input type="radio" name="rom-${joint.key}" value="${opt.val}" ${current === opt.val ? "checked" : ""}>
+            <span>${escapeHtml(opt.label)}</span>
+          </label>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function collectRomJointResults(joints, selectedKeys) {
+  return joints
+    .filter((j) => selectedKeys.includes(j.key))
+    .map((j) => ({ gelenk: j.key, bewertung: getRadioValue(`rom-${j.key}`) }))
+    .filter((r) => r.bewertung);
+}
+
+function ampelBadgeHtml(ampel) {
+  if (!ampel) return "";
+  const cls = ampel === "gruen" ? "pill-green" : ampel === "gelb" ? "pill-orange" : "pill-red";
+  return `<span class="${cls}">${Assessment.ampelEmoji(ampel)}</span>`;
+}
+
+function getPreviousAssessment(patient, beforeId) {
+  const list = (patient.assessments || []).filter((a) => a.id !== beforeId && (a.barthel || a.nrs !== null || a.neuro || a.ortho));
+  return list.length > 0 ? list[0] : null;
+}
+
+// Extrahiert vergleichbare Testergebnisse aus einem einzelnen Assessment-
+// Eintrag (für Verlauf, Ampel und Therapiebericht). Gibt nur Tests zurück,
+// die in diesem Eintrag tatsächlich erhoben wurden.
+function extractAssessmentScores(assessment) {
+  if (!assessment) return [];
+  const a = assessment;
+  const scores = [];
+
+  const barthelValues = a.barthel || {};
+  if (Object.values(barthelValues).some((v) => v !== null && v !== undefined)) {
+    const total = Assessment.computeBarthelTotal(barthelValues);
+    scores.push({ key: "barthel", label: "Barthel-Index", value: total, max: Assessment.BARTHEL_MAX, direction: "high", classify: () => Assessment.classifyBarthel(total) });
+  }
+
+  if (a.schmerzTyp === "besd" && Object.values(a.besd || {}).some((v) => v !== null && v !== undefined)) {
+    const total = Assessment.computeBesdTotal(a.besd);
+    scores.push({ key: "schmerz", label: "Schmerz (BESD)", value: total, max: Assessment.BESD_MAX, direction: "low", classify: () => Assessment.classifyBesd(total) });
+  } else if (a.schmerzTyp === "nrs" && a.nrs !== null && a.nrs !== undefined) {
+    scores.push({ key: "schmerz", label: "Schmerz (NRS)", value: a.nrs, max: Assessment.NRS_MAX, direction: "low", classify: () => Assessment.classifyNrs(a.nrs) });
+  }
+
+  if (a.tug && a.tug.sekunden !== null && a.tug.sekunden !== undefined) {
+    scores.push({ key: "tug", label: "TUG", value: a.tug.sekunden, max: null, direction: "low", unit: "s", classify: () => Assessment.classifyTug(a.tug.sekunden) });
+  }
+
+  if (a.weiche === "neurologisch") {
+    const bbs = Assessment.computeBbs7(a.neuro?.bbs7);
+    if (bbs.maxPossible > 0) {
+      scores.push({ key: "bbs7", label: "BBS-7", value: bbs.total, max: Assessment.BBS7_MAX, direction: "high", classify: () => Assessment.classifyBbs7(bbs.total) });
+    }
+    const rmiAnswered = (a.neuro?.rmi?.antworten || []).length > 0;
+    if (rmiAnswered) {
+      const total = Assessment.computeRmiTotal(a.neuro.rmi.antworten, a.neuro.rmi.beobachtung);
+      scores.push({ key: "rmi", label: "RMI", value: total, max: Assessment.RMI_MAX, direction: "high", classify: () => Assessment.classifyRmi(total) });
+    }
+    const mrc = Assessment.computeMrcTotal(a.neuro?.mrc?.gruppen);
+    if (mrc.count > 0) {
+      scores.push({ key: "mrc", label: "MRC gesamt", value: mrc.total, max: mrc.max, direction: "high" });
+    }
+  } else if (a.weiche === "orthopaedisch") {
+    const sppb = Assessment.computeSppbTotal(a.ortho?.sppb);
+    if (a.ortho?.sppb) {
+      scores.push({ key: "sppb", label: "SPPB", value: sppb.total, max: Assessment.SPPB_MAX, direction: "high", classify: () => Assessment.classifySppb(sppb.total) });
+    }
+  } else if (a.weiche === "schwerstbetroffen") {
+    const mrc = Assessment.computeMrcTotal(a.schwerst?.mrc?.gruppen);
+    if (mrc.count > 0) {
+      scores.push({ key: "mrcSchwerst", label: "MRC gesamt (liegend)", value: mrc.total, max: mrc.max, direction: "high" });
+    }
+  }
+
+  return scores;
+}
+
+function renderLineChartSvg(series, { width = 280, height = 70 } = {}) {
+  if (series.length < 2) return "";
+  const values = series.map((p) => p.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values, min + 1);
+  const stepX = width / (series.length - 1);
+  const points = series.map((p, idx) => {
+    const x = idx * stepX;
+    const y = height - ((p.value - min) / (max - min)) * (height - 10) - 5;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+
+  return `
+    <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="display:block;">
+      <polyline points="${points}" fill="none" stroke="#2563eb" stroke-width="2"></polyline>
+      ${series.map((p, idx) => {
+        const x = idx * stepX;
+        const y = height - ((p.value - min) / (max - min)) * (height - 10) - 5;
+        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3" fill="#2563eb"></circle>`;
+      }).join("")}
+    </svg>
+  `;
+}
+
+function renderAssessmentHistorySection(patient) {
+  const assessments = [...(patient.assessments || [])]
+    .filter((a) => a.barthel || a.neuro || a.ortho || a.schwerst || a.nrs !== null)
+    .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+
+  if (assessments.length === 0) {
+    return `<p class="muted" style="margin-top:12px;">Noch keine strukturierten Assessments durchgeführt.</p>`;
+  }
+
+  // Verlaufsgraphen je Test (chronologisch aufsteigend)
+  const chronological = [...assessments].reverse();
+  const seriesByKey = new Map();
+  chronological.forEach((a) => {
+    extractAssessmentScores(a).forEach((s) => {
+      if (!seriesByKey.has(s.key)) seriesByKey.set(s.key, { label: s.label, points: [] });
+      seriesByKey.get(s.key).points.push({ date: a.date, value: s.value });
+    });
+  });
+
+  const chartsHtml = Array.from(seriesByKey.values())
+    .filter((s) => s.points.length >= 2)
+    .map((s) => `
+      <div class="compact-card" style="margin-bottom:8px;">
+        <div style="font-weight:600; margin-bottom:6px;">${escapeHtml(s.label)} – Verlauf</div>
+        ${renderLineChartSvg(s.points)}
+      </div>
+    `).join("");
+
+  const entriesHtml = assessments.map((a, idx) => {
+    const previous = assessments[idx + 1] || null;
+    const scores = extractAssessmentScores(a);
+    const prevScores = previous ? extractAssessmentScores(previous) : [];
+
+    const scoreLines = scores.map((s) => {
+      const prev = prevScores.find((p) => p.key === s.key);
+      const ampel = prev ? Assessment.computeAmpel({ current: s.value, previous: prev.value, max: s.max, direction: s.direction }) : null;
+      const deltaText = prev ? ` (Vorwert: ${prev.value}${s.unit || ""}, ${s.value - prev.value >= 0 ? "+" : ""}${(s.value - prev.value).toFixed(s.unit ? 1 : 0)}${s.unit || ""})` : "";
+      const classification = s.classify ? s.classify() : "";
+      return `<div>${ampelBadgeHtml(ampel)} <strong>${escapeHtml(s.label)}:</strong> ${s.value}${s.max ? `/${s.max}` : s.unit || ""} ${classification ? `– ${escapeHtml(classification)}` : ""}${escapeHtml(deltaText)}</div>`;
+    }).join("");
+
+    return `
+      <details class="accordion" style="margin-bottom:8px;">
+        <summary><span>${escapeHtml(formatDeDate(a.date))}</span><span class="muted">${escapeHtml(Assessment.WEICHEN_OPTIONEN.find((w) => w.val === a.weiche)?.label || "Basis")}</span></summary>
+        <div class="accordion-body">${scoreLines || '<p class="muted">Keine auswertbaren Ergebnisse.</p>'}</div>
+      </details>
+    `;
+  }).join("");
+
+  return `
+    ${chartsHtml}
+    <div class="list-stack" style="margin-top:8px;">${entriesHtml}</div>
+  `;
+}
+
+function collectRezeptFormPayload() {
+  return {
+    arzt: document.getElementById("arzt").value.trim(),
+    ausstell: document.getElementById("ausstell").value.trim(),
+    bg: document.getElementById("bg").checked,
+    dt: document.getElementById("dt").checked,
+    dringend: document.getElementById("dringend").checked,
+    icd10: document.getElementById("icd10").value.trim(),
+    icd10b: document.getElementById("icd10b")?.value.trim() || "",
+    leitsymptomatik: document.getElementById("leitsymptomatik").value.trim(),
+    hausbesuch: document.getElementById("hausbesuch").value,
+    arztStempel: document.getElementById("arztStempel").value,
+    arztUnterschrift: document.getElementById("arztUnterschrift").value,
+    items: collectRezeptItemsFromForm()
+  };
+}
+
+function renderRezeptPruefungPanel(validation) {
+  if (validation.ok) {
+    return `<p class="pill-green">✓ Alle Pflichtfelder vollständig · Fristen ok</p>`;
+  }
+
+  return `
+    <div class="error" style="margin-top:12px;">
+      <p class="pill-red" style="display:block; margin-bottom:8px;">✗ Rezeptprüfung: ${validation.errors.length} Punkt(e) offen</p>
+      <ul style="margin:0; padding-left:20px; font-weight:400;">
+        ${validation.errors.map((err) => `<li>${escapeHtml(err.message)}</li>`).join("")}
+      </ul>
+    </div>
+  `;
+}
+
+function bindRezeptPruefungLive(panelId) {
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+
+  const refresh = () => {
+    const payload = collectRezeptFormPayload();
+    const validation = validateRezeptPflichtfelder(payload);
+    panel.innerHTML = renderRezeptPruefungPanel(validation);
+  };
+
+  ["arzt", "ausstell", "bg", "dt", "dringend", "icd10", "icd10b", "leitsymptomatik", "hausbesuch", "arztStempel", "arztUnterschrift"]
+    .forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("input", refresh);
+      if (el) el.addEventListener("change", refresh);
+    });
+
+  const container = document.getElementById("leistungenContainer");
+  if (container) {
+    container.addEventListener("input", refresh);
+    container.addEventListener("change", refresh);
+  }
+  const addBtn = document.getElementById("addLeistungRowBtn");
+  if (addBtn) addBtn.addEventListener("click", refresh);
+
+  refresh();
+}
+
 function render(html) {
   app.innerHTML = html;
   bindDateAutoFormatsIn(app);
+}
+
+// Kurze, stille Meldung (z.B. "Export gesendet") ohne dass der Therapeut
+// etwas tun muss. Verschwindet nach ein paar Sekunden von selbst.
+export function showToast(message) {
+  const toast = document.createElement("div");
+  toast.textContent = message;
+  toast.style.cssText = "position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#0f172a; color:#fff; padding:12px 18px; border-radius:12px; font-size:14px; box-shadow:0 10px 30px rgba(15,23,42,0.25); z-index:9999; max-width:90vw; text-align:center;";
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 4000);
+}
+
+// Erinnerung an das Viewer-Backup als eigenständiges Overlay (als Kind von
+// document.body statt #app angehängt, damit es unabhängig von der gerade
+// angezeigten Ansicht sichtbar bleibt und von einem render()-Aufruf der
+// dahinterliegenden Ansicht nicht mit entfernt wird). Kein automatischer
+// Versand mehr (EmailJS wurde entfernt) - der Therapeut erledigt das
+// Backup per Klick selbst: Download und/oder E-Mail-Programm mit
+// vorbereitetem Anhangs-Hinweis öffnen. "Später erinnern" lässt die
+// Fälligkeit bewusst unverändert, damit die Erinnerung beim nächsten
+// Öffnen der App erneut erscheint.
+export function showBackupReminderModal({ onDone } = {}) {
+  const runtimeData = getRuntimeData();
+  if (!runtimeData) return;
+
+  document.getElementById("backupReminderOverlay")?.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "backupReminderOverlay";
+  overlay.style.cssText = "position:fixed; inset:0; background:rgba(15,23,42,0.55); z-index:9998; display:flex; align-items:center; justify-content:center; padding:16px;";
+  overlay.innerHTML = `
+    <div class="card" style="max-width:420px; width:100%; margin:0;">
+      <h3>🔔 Backup-Erinnerung</h3>
+      <p class="muted">Für den separaten Offline-Viewer sollte regelmäßig ein Backup aller Praxisdaten erstellt werden.</p>
+      <div class="row" style="flex-direction:column; gap:10px; margin-top:16px;">
+        <button id="backupReminderDownloadBtn" style="margin-top:0;">Als Datei herunterladen</button>
+        <button id="backupReminderMailBtn" class="secondary" style="margin-top:0;">Per E-Mail senden (mailto)</button>
+        <button id="backupReminderLaterBtn" class="secondary" style="margin-top:0;">Später erinnern</button>
+      </div>
+      <div id="backupReminderMsg" class="muted" style="margin-top:12px;"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  function close() {
+    overlay.remove();
+    if (onDone) onDone();
+  }
+
+  document.getElementById("backupReminderLaterBtn").onclick = async () => {
+    await markBackupReminderPostponed();
+    close();
+  };
+
+  async function createBackupZip() {
+    const msg = document.getElementById("backupReminderMsg");
+    msg.className = "muted";
+    msg.textContent = "Backup wird erstellt…";
+    const result = await buildBackupZip(runtimeData);
+    downloadBlob(result.blob, result.filename);
+    return result;
+  }
+
+  document.getElementById("backupReminderDownloadBtn").onclick = async () => {
+    try {
+      const result = await createBackupZip();
+      await markBackupReminderHandled(`Backup "${result.filename}" heruntergeladen.`);
+      showToast("Backup heruntergeladen");
+      close();
+    } catch (err) {
+      console.error(err);
+      const msg = document.getElementById("backupReminderMsg");
+      msg.className = "error";
+      msg.textContent = `Backup fehlgeschlagen: ${err.message || err}`;
+    }
+  };
+
+  document.getElementById("backupReminderMailBtn").onclick = async () => {
+    try {
+      const result = await createBackupZip();
+      window.location.href = buildBackupReminderMailtoLink({
+        filename: result.filename,
+        therapistName: runtimeData.settings?.therapistName
+      });
+      await markBackupReminderHandled(`Backup "${result.filename}" heruntergeladen, E-Mail-Programm geöffnet (Anhang manuell hinzufügen).`);
+      showToast("Backup heruntergeladen - bitte in der E-Mail anhängen");
+      close();
+    } catch (err) {
+      console.error(err);
+      const msg = document.getElementById("backupReminderMsg");
+      msg.className = "error";
+      msg.textContent = `Backup fehlgeschlagen: ${err.message || err}`;
+    }
+  };
 }
 
 function openHtmlDocument(title, bodyHtml, { autoPrint = false } = {}) {
@@ -1286,34 +1960,68 @@ function ensureDoctorReportsState(rezept) {
   return rezept.doctorReports;
 }
 
-function buildDoctorReportTemplate({ patient, rezept }) {
-  const today = formatCurrentDateShort();
-  const patientName = `${patient?.firstName || ""} ${patient?.lastName || ""}`.trim() || "Patient/in";
-  const birthDate = patient?.birthDate ? `, geb.: ${patient.birthDate}` : "";
-  const homeName = patient?.homeName || "";
-  const ausstell = rezept?.ausstell || "—";
+// Legt einen neuen, leeren Arztbericht für ein Rezept an und gibt dessen
+// reportId zurück - gemeinsam genutzt vom bisherigen Weg (Einrichtung ->
+// Patient -> Arztbericht-Bereich -> Rezept auswählen) und dem neuen
+// Schnellzugriff-Button in der Patientenliste, damit die Erzeugungslogik
+// nicht doppelt gepflegt werden muss.
+function createDoctorReportForRezept(homeId, patientId, rezeptId) {
+  let createdReportId = "";
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    const patient = getPatientById(home, patientId);
+    const rezept = getRezeptById(patient, rezeptId);
+    if (!patient || !rezept) throw new Error("Rezept nicht gefunden");
+    const reports = ensureDoctorReportsState(rezept);
+    const now = new Date().toISOString();
+    createdReportId = `report_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    reports.unshift({
+      reportId: createdReportId,
+      content: "",
+      therapieziele: [],
+      therapiezielFreitext: "",
+      compliance: "",
+      complianceFreitext: "",
+      verlauf: "",
+      verlaufFreitext: "",
+      therapieWeiterfuehren: "",
+      therapieNutzen: "",
+      therapieText: "",
+      bemerkungen: "",
+      createdAt: now,
+      updatedAt: now
+    });
+  });
+  return createdReportId;
+}
 
-  return [
-    `Therapiebericht an ${rezept?.arzt || "den behandelnden Arzt"} vom ${today}`,
-    "",
-    "für den Patienten:",
-    `${patientName}${birthDate}`,
-    homeName ? `Einrichtung: ${homeName}` : "",
-    "",
-    `Ihre Verordnung vom ${ausstell}`,
-    "",
-    "Stand der Therapie:",
-    "",
-    "Besonderheiten während des Behandlungsverlaufs:",
-    "",
-    "Fortsetzung der Therapie vorgeschlagen:",
-    "",
-    "Prognostische Einschätzung:",
-    "",
-    "Mit freundlichen Grüßen",
-    "",
-    ""
-  ].join("\n").replace('für den Patienten:\",\"', 'für den Patienten:');
+// Teil 1 des Therapieberichts (automatisch): letztes Assessment mit
+// Ampel/Delta zum Vorwert, z.B. "Barthel-Index: 65/100 🟡 (Vorwert: 75/100, -10 Punkte)".
+function buildAssessmentSummaryLines(patient) {
+  const assessments = [...(patient?.assessments || [])]
+    .filter((a) => a.barthel || a.neuro || a.ortho || a.schwerst || a.nrs !== null)
+    .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+
+  if (assessments.length === 0) return null;
+
+  const latest = assessments[0];
+  const previous = assessments[1] || null;
+  const scores = extractAssessmentScores(latest);
+  const prevScores = previous ? extractAssessmentScores(previous) : [];
+
+  return {
+    date: latest.date,
+    lines: scores.map((s) => {
+      const prev = prevScores.find((p) => p.key === s.key);
+      const ampel = prev ? Assessment.computeAmpel({ current: s.value, previous: prev.value, max: s.max, direction: s.direction }) : null;
+      const delta = prev ? `${s.value - prev.value >= 0 ? "+" : ""}${(s.value - prev.value).toFixed(s.unit ? 1 : 0)}${s.unit || ""}` : "";
+      return {
+        text: `${s.label}: ${s.value}${s.max ? `/${s.max}` : s.unit || ""}`,
+        ampel,
+        deltaText: prev ? `Vorwert: ${prev.value}${s.unit || ""}, ${delta}` : ""
+      };
+    })
+  };
 }
 
 function getPracticeHeaderLines(settings = {}) {
@@ -1325,6 +2033,52 @@ function getPracticeHeaderLines(settings = {}) {
     settings.therapistFax ? `Fax ${settings.therapistFax}` : ''
   ]);
   return lines;
+}
+
+// Feste Einleitung des Therapieberichts, automatisch mit Patientendaten
+// befüllt (Vorgabe Aufgabe 6). "der/die" bleibt bewusst ungegendert
+// stehen, wie in der Nutzervorgabe wörtlich vorgegeben - nur die vier
+// markierten Platzhalter werden ersetzt.
+function buildDoctorReportIntroLine(patient) {
+  const anredeArzt = "Sehr geehrte Damen und Herren";
+  const anredePatient = patient?.anrede === "frau" ? "Frau " : patient?.anrede === "herr" ? "Herrn " : "";
+  const patientName = formatPatientName(patient) || "";
+  const geburtsdatum = patient?.birthDate || "—";
+
+  return `${anredeArzt}, vielen Dank für die Heilmittelverordnung für ${anredePatient}${patientName}, geboren am ${geburtsdatum}, der/die bei uns in Behandlung ist. Um Sie über den aktuellen Stand der Therapie auf dem Laufenden zu halten, übermitteln wir Ihnen folgenden Bericht.`;
+}
+
+// Zeigt ALLE bisher durchgeführten Assessments eines Patienten (nicht nur
+// das letzte) mit Ampel/Delta zum jeweiligen Vorwert - Vorgabe Aufgabe 6
+// ("Alle Assessments anzeigen"). Analog zu renderAssessmentHistorySection,
+// aber ohne <details>-Akkordeon, da eingeklappte <details>-Inhalte beim
+// Drucken/PDF-Export je nach Browser nicht mit ausgegeben werden.
+function buildAllAssessmentsReportHtml(patient) {
+  const assessments = [...(patient?.assessments || [])]
+    .filter((a) => a.barthel || a.neuro || a.ortho || a.schwerst || a.nrs !== null)
+    .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+
+  if (assessments.length === 0) return `<div>Kein Assessment durchgeführt</div>`;
+
+  return assessments.map((a, idx) => {
+    const previous = assessments[idx + 1] || null;
+    const scores = extractAssessmentScores(a);
+    const prevScores = previous ? extractAssessmentScores(previous) : [];
+
+    const lines = scores.map((s) => {
+      const prev = prevScores.find((p) => p.key === s.key);
+      const ampel = prev ? Assessment.computeAmpel({ current: s.value, previous: prev.value, max: s.max, direction: s.direction }) : null;
+      const deltaText = prev ? ` (Vorwert: ${prev.value}${s.unit || ""}, ${s.value - prev.value >= 0 ? "+" : ""}${(s.value - prev.value).toFixed(s.unit ? 1 : 0)}${s.unit || ""})` : "";
+      return `<div>${Assessment.ampelEmoji(ampel)} ${escapeHtml(s.label)}: ${s.value}${s.max ? `/${s.max}` : s.unit || ""}${escapeHtml(deltaText)}</div>`;
+    }).join("");
+
+    return `
+      <div style="margin-bottom:10px;">
+        <div style="font-weight:600;">${escapeHtml(formatDeDate(a.date))}</div>
+        ${lines || '<div class="muted">Keine auswertbaren Ergebnisse.</div>'}
+      </div>
+    `;
+  }).join("");
 }
 
 function formatDoctorReportBodyHtml(content = "") {
@@ -1351,9 +2105,16 @@ function formatDoctorReportBodyHtml(content = "") {
 function renderDoctorReportPrintHtml({ settings = {}, patient = {}, rezept = {}, report = {} }) {
   const headerLines = getPracticeHeaderLines(settings);
   const createdDate = formatIsoDateShort(report?.createdAt);
-  const subjectDate = formatCurrentDateShort(new Date(report?.createdAt || Date.now()));
-  const patientName = `${patient?.firstName || ""} ${patient?.lastName || ""}`.trim() || 'Patient/in';
-  const bodyHtml = formatDoctorReportBodyHtml(report?.content || '');
+  const patientName = formatPatientName(patient) || 'Patient/in';
+  const introLine = buildDoctorReportIntroLine(patient);
+  const allAssessmentsHtml = buildAllAssessmentsReportHtml(patient);
+
+  const therapieziele = [...(report?.therapieziele || []), report?.therapiezielFreitext].filter(Boolean).join(", ");
+  const complianceLabel = Assessment.COMPLIANCE_OPTIONEN.find((o) => o.val === report?.compliance)?.label || "";
+  const verlaufLabel = Assessment.VERLAUF_OPTIONEN.find((o) => o.val === report?.verlauf)?.label || "";
+  const weiterfuehrenLabel = Assessment.THERAPIE_WEITERFUEHREN_OPTIONEN.find((o) => o.val === report?.therapieWeiterfuehren)?.label || "";
+  const nutzenLabel = Assessment.THERAPIE_NUTZEN_OPTIONEN.find((o) => o.val === report?.therapieNutzen)?.label || "";
+  const legacyBodyHtml = report?.content ? formatDoctorReportBodyHtml(report.content) : "";
 
   return `
     <style>
@@ -1364,6 +2125,8 @@ function renderDoctorReportPrintHtml({ settings = {}, patient = {}, rezept = {},
       .doctor-report-recipient{margin:18px 0 26px;}
       .doctor-report-title{font-size:28px;font-weight:700;margin:0 0 18px;line-height:1.2;}
       .doctor-report-meta{margin:0 0 18px;}
+      .doctor-report-section{margin:0 0 16px;}
+      .doctor-report-section h4{margin:0 0 6px;font-size:14px;}
       .doctor-report-body{white-space:normal;line-height:1.55;}
       .doctor-report-sign{margin-top:28px;}
     </style>
@@ -1376,14 +2139,47 @@ function renderDoctorReportPrintHtml({ settings = {}, patient = {}, rezept = {},
       </div>
 
       <div class="doctor-report-recipient">${escapeHtml(rezept?.arzt || '—')}</div>
-      <div class="doctor-report-title">Therapiebericht an ${escapeHtml(rezept?.arzt || '—')} vom ${escapeHtml(subjectDate)}</div>
+      <div class="doctor-report-title">Therapiebericht</div>
       <div class="doctor-report-meta">
         <strong>für den Patienten:</strong><br>
         ${escapeHtml(patientName)}${patient?.birthDate ? `, geb.: ${escapeHtml(patient.birthDate)}` : ''}<br>
         ${patient?.homeName ? `Einrichtung: ${escapeHtml(patient.homeName)}<br>` : ''}
         Ihre Verordnung vom ${escapeHtml(rezept?.ausstell || '—')}
       </div>
-      <div class="doctor-report-body">${bodyHtml}</div>
+
+      <div class="doctor-report-section doctor-report-body">${escapeHtml(introLine)}</div>
+
+      <div class="doctor-report-section">
+        <h4>Assessment-Verlauf</h4>
+        ${allAssessmentsHtml}
+      </div>
+
+      ${therapieziele || complianceLabel || verlaufLabel || weiterfuehrenLabel || nutzenLabel ? `
+        <div class="doctor-report-section">
+          ${therapieziele ? `<div><strong>Therapieziel:</strong> ${escapeHtml(therapieziele)}</div>` : ''}
+          ${complianceLabel ? `<div><strong>Patientencompliance:</strong> ${escapeHtml(complianceLabel)}${report?.complianceFreitext ? ` – ${escapeHtml(report.complianceFreitext)}` : ''}</div>` : ''}
+          ${verlaufLabel ? `<div><strong>Verlauf:</strong> ${escapeHtml(verlaufLabel)}${report?.verlaufFreitext ? ` – ${escapeHtml(report.verlaufFreitext)}` : ''}</div>` : ''}
+          ${weiterfuehrenLabel ? `<div><strong>Therapie weiterführen:</strong> ${escapeHtml(weiterfuehrenLabel)}</div>` : ''}
+          ${nutzenLabel ? `<div><strong>Therapie bringt Nutzen:</strong> ${escapeHtml(nutzenLabel)}</div>` : ''}
+        </div>
+      ` : ''}
+
+      ${report?.therapieText ? `
+        <div class="doctor-report-section">
+          <h4>Therapie</h4>
+          <div class="doctor-report-body">${escapeAndPreserveLineBreaks(report.therapieText)}</div>
+        </div>
+      ` : ''}
+
+      ${report?.bemerkungen ? `
+        <div class="doctor-report-section">
+          <h4>Bemerkungen</h4>
+          <div class="doctor-report-body">${escapeAndPreserveLineBreaks(report.bemerkungen)}</div>
+        </div>
+      ` : ''}
+
+      ${legacyBodyHtml ? `<div class="doctor-report-section doctor-report-body">${legacyBodyHtml}</div>` : ''}
+
       <div class="doctor-report-sign">${escapeHtml(settings?.therapistName || '')}</div>
     </div>
   `;
@@ -1454,7 +2250,7 @@ export function showSetupView({ onSuccess }) {
   render(`
     <div class="card">
       <h2>Ersteinrichtung</h2>
-      <p class="muted">FaSt-Doku wird jetzt mit Praxispasswort und PIN abgesichert.</p>
+      <p class="muted">FaSt App wird jetzt mit Praxispasswort und PIN abgesichert.</p>
 
       <label for="therapistName">Therapeutenname</label>
       <input id="therapistName" type="text" autocomplete="off">
@@ -1610,7 +2406,7 @@ export function showLoginView({ onSuccess }) {
   render(`
     <div class="card">
       <h2>PIN Login</h2>
-      <p class="muted">Bitte PIN eingeben, um FaSt-Doku zu entsperren.</p>
+      <p class="muted">Bitte PIN eingeben, um FaSt App zu entsperren.</p>
 
       <label for="loginPin">PIN</label>
       <input id="loginPin" type="password" inputmode="numeric" autocomplete="current-password">
@@ -1789,8 +2585,32 @@ export function showSettingsView({ onLock }) {
       <input id="settingsStundenStartsaldo" type="text" inputmode="numeric" autocomplete="off" value="${escapeHtml(getSignedMinutesLabel(getStundenStartsaldoMinutes(settings)).replace(' Stunden', ''))}" placeholder="z. B. +40:00 oder -12:30">
       <p class="muted">Plus-/Minusstunden vor App-Einführung. Wird zum Stundenkonto addiert.</p>
 
+      <h3 style="margin-top:20px;">Zertifikate</h3>
+      <p class="muted">Wird für die Rezeptoptimierung (Vorschläge nur für zertifizierte Heilmittel) verwendet.</p>
+      <div class="checkbox-row">
+        <label class="check-chip"><input id="zertMt" type="checkbox" ${settings.zertifikate?.mt ? "checked" : ""}> <span>MT</span></label>
+        <label class="check-chip"><input id="zertMld" type="checkbox" ${settings.zertifikate?.mld ? "checked" : ""}> <span>MLD</span></label>
+        <label class="check-chip"><input id="zertKgzns" type="checkbox" ${settings.zertifikate?.kgzns ? "checked" : ""}> <span>KG-ZNS</span></label>
+      </div>
+
+      <label for="settingsBueroEmail">Büro-E-Mail-Adresse</label>
+      <input id="settingsBueroEmail" type="email" autocomplete="off" value="${escapeHtml(settings.buero?.email || "")}" placeholder="buero@praxis.de">
+
+      <label for="settingsAssessmentInterval">Assessment-Intervall (Folge-Assessments)</label>
+      <select id="settingsAssessmentInterval">
+        <option value="3" ${Number(settings.assessmentIntervalMonths) === 3 ? "selected" : ""}>Alle 3 Monate</option>
+        <option value="6" ${Number(settings.assessmentIntervalMonths) === 6 ? "selected" : ""}>Alle 6 Monate</option>
+      </select>
+
       <button id="saveSettingsBtn">Änderungen speichern</button>
       <div id="settingsMessage"></div>
+    </div>
+
+    <div class="card">
+      <h3>App-Version</h3>
+      <p class="muted">Aktuelle Version: ${escapeHtml(APP_VERSION)}</p>
+      <button id="checkForUpdatesBtn" class="secondary">Aktualisieren</button>
+      <div id="updateCheckMsg" class="muted" style="margin-top:10px;"></div>
     </div>
   `);
 
@@ -1811,6 +2631,13 @@ export function showSettingsView({ onLock }) {
     const fastStartDatumInput = document.getElementById("settingsFastStartDatum").value.trim();
     const fastStartDatum = fastStartDatumInput ? parseDeDate(fastStartDatumInput) : "";
     const stundenStartsaldoMinuten = parseStundenStartsaldoInput(document.getElementById("settingsStundenStartsaldo").value);
+    const zertifikate = {
+      mt: document.getElementById("zertMt").checked,
+      mld: document.getElementById("zertMld").checked,
+      kgzns: document.getElementById("zertKgzns").checked
+    };
+    const bueroEmail = document.getElementById("settingsBueroEmail").value.trim();
+    const assessmentIntervalMonths = Number(document.getElementById("settingsAssessmentInterval").value);
     const msg = document.getElementById("settingsMessage");
 
     msg.className = "error";
@@ -1841,6 +2668,9 @@ export function showSettingsView({ onLock }) {
         data.settings.weeklyHours = weeklyHours;
         data.settings.fastStartDatum = fastStartDatum;
         data.settings.stundenStartsaldoMinuten = stundenStartsaldoMinuten;
+        data.settings.zertifikate = zertifikate;
+        data.settings.buero = { email: bueroEmail };
+        data.settings.assessmentIntervalMonths = assessmentIntervalMonths;
         data.settings.updatedAt = new Date().toISOString();
       });
 
@@ -1853,6 +2683,58 @@ export function showSettingsView({ onLock }) {
       msg.textContent = err?.message || "Einstellungen konnten nicht gespeichert werden.";
     }
   };
+
+  document.getElementById("checkForUpdatesBtn").onclick = async () => {
+    const updateMsg = document.getElementById("updateCheckMsg");
+    updateMsg.textContent = "Suche nach Updates ...";
+    try {
+      // Eventuell vorhandene Browser-Caches leeren, damit garantiert die
+      // neueste vom Server ausgelieferte Version geladen wird (die App hat
+      // keinen Service Worker mehr, aber ältere Geräte könnten noch
+      // Caches aus einer früheren Version haben).
+      if ("caches" in window) {
+        const cacheKeys = await caches.keys();
+        await Promise.all(cacheKeys.map((key) => caches.delete(key)));
+      }
+    } catch (err) {
+      console.error("Cache konnte nicht geleert werden:", err);
+    }
+    window.location.reload();
+  };
+}
+
+function formatBackupReminderHistoryLine(entry) {
+  const time = entry.createdAt ? new Date(entry.createdAt).toLocaleString("de-DE") : "";
+  const icon = entry.status === "handled" ? "✅" : "⏭";
+  return `<div class="row" style="padding:6px 0;">
+    <strong>${icon} ${escapeHtml(time)}</strong>
+  </div>`;
+}
+
+function renderBackupReminderAccordion(runtimeData) {
+  const history = Array.isArray(runtimeData?.autoExportHistory) ? runtimeData.autoExportHistory : [];
+  const lastAt = runtimeData?.ui?.lastAutoExportAt || "";
+
+  const statusSummary = lastAt ? "Zuletzt erledigt" : "Noch nicht erledigt";
+
+  return `
+    <details class="accordion">
+      <summary>
+        <span>Backup-Erinnerung</span>
+        <span class="muted">${escapeHtml(statusSummary)}</span>
+      </summary>
+      <div class="accordion-body">
+        <p class="muted">${escapeHtml(lastAt ? `Zuletzt erledigt: ${new Date(lastAt).toLocaleString("de-DE")}` : "Noch nicht erledigt.")}</p>
+        <button id="backupReminderNowBtn" class="secondary" style="margin-top:0;">Jetzt Backup machen</button>
+        ${history.length ? `
+          <div style="margin-top:16px;">
+            <div class="muted" style="font-weight:600; margin-bottom:4px;">Verlauf (letzte ${Math.min(history.length, 5)}):</div>
+            ${history.slice(0, 5).map(formatBackupReminderHistoryLine).join("")}
+          </div>
+        ` : ""}
+      </div>
+    </details>
+  `;
 }
 
 export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
@@ -1866,9 +2748,42 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
   const todayDate = formatCurrentDateShort();
   const totalTrackedMinutes = getTotalTrackedMinutes(runtimeData, todayDate);
   const dashboardTodayPatients = getDashboardTodayPatients(runtimeData, todayDate);
+  const zuzahlungErinnerungen = getFaelligeZuzahlungErinnerungen(runtimeData);
+  const assessmentErinnerungen = getFaelligeAssessmentErinnerungen(runtimeData);
 
   render(`
     ${renderDashboardHeaderCard({ therapistName, lastBackupAt })}
+
+    ${zuzahlungErinnerungen.length > 0 ? `
+      <div class="card" style="background:#fffbeb; border-color:#f59e0b;">
+        <h3>Zuzahlungsstatus ungeklärt</h3>
+        <div class="list-stack">
+          ${zuzahlungErinnerungen.map((item) => `
+            <div class="compact-card" style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+              <div>Zuzahlungsstatus ungeklärt – Patient ${escapeHtml(item.patientName)}</div>
+              <button type="button" class="klaereZuzahlungBtn secondary" style="width:auto;" data-home-id="${escapeHtml(item.homeId)}" data-patient-id="${escapeHtml(item.patientId)}">Jetzt klären</button>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    ` : ""}
+
+    ${assessmentErinnerungen.length > 0 ? `
+      <div class="card" style="background:#eff6ff; border-color:#2563eb;">
+        <h3>Assessment fällig</h3>
+        <div class="list-stack">
+          ${assessmentErinnerungen.map((item) => `
+            <div class="compact-card" style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+              <div>Assessment fällig – Patient ${escapeHtml(item.patientName)}</div>
+              <div class="row" style="width:auto; gap:8px;">
+                <button type="button" class="assessmentJetztDurchfuehrenBtn secondary" style="width:auto;" data-home-id="${escapeHtml(item.homeId)}" data-patient-id="${escapeHtml(item.patientId)}">Jetzt durchführen</button>
+                <button type="button" class="assessmentVerschiebenBtn secondary" style="width:auto;" data-home-id="${escapeHtml(item.homeId)}" data-patient-id="${escapeHtml(item.patientId)}">Verschieben</button>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    ` : ""}
 
     <details class="accordion" ${keepOverviewOpen ? 'open' : ''}>
       <summary>
@@ -1922,33 +2837,6 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
             }
           </div>
         </details>
-        <details class="accordion" style="margin-top:10px;">
-          <summary>
-            <span>Besprechungszeit</span>
-            <span class="muted">mit PIN</span>
-          </summary>
-          <div class="accordion-body">
-                <label for="dashboardTimeRezept">Zielrezept</label>
-                <select id="dashboardTimeRezept">
-                  <option value="">Bitte wählen</option>
-                  ${getAllRezeptOptions(runtimeData).map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)} · ${escapeHtml(item.homeName || '—')}</option>`).join("")}
-                </select>
-
-                <label for="dashboardTimeDate">Datum</label>
-                <input id="dashboardTimeDate" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
-
-                <label for="dashboardTimeMinutes">Minuten</label>
-                <input id="dashboardTimeMinutes" type="number" min="1" step="1" placeholder="z.B. 60 oder 120" inputmode="numeric">
-
-                <label for="dashboardTimeNote">Notiz</label>
-                <input id="dashboardTimeNote" type="text" placeholder="optional">
-
-                <button id="dashboardSaveTimeBtn">Besprechung speichern</button>
-                <div id="dashboardTimeMsg"></div>
-              </div>
-            </details>
-          </details>
-        </div>
       </div>
     </details>
 
@@ -1959,15 +2847,26 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
         <button id="openHomesBtn" class="secondary" style="margin-top:0;">Einrichtungen</button>
       </div>
       <div class="row" style="margin-top:12px;">
+        <button id="openPatientenBtn" class="secondary" style="margin-top:0;">👤 Patienten</button>
         <button id="openAbgabeBtn" class="secondary" style="margin-top:0;">Abgabeliste</button>
-        <button id="openNachbestellBtn" class="secondary" style="margin-top:0;">Nachbestellung</button>
       </div>
       <div class="row" style="margin-top:12px;">
+        <button id="openNachbestellBtn" class="secondary" style="margin-top:0;">Nachbestellung</button>
         <button id="openKilometerBtn" class="secondary" style="margin-top:0;">Kilometer</button>
+      </div>
+      <div class="row" style="margin-top:12px;">
         <button id="openUnterschriftenblattBtn" class="secondary" style="margin-top:0;">Unterschriften</button>
       </div>
       <div class="row" style="margin-top:12px;">
-        <button id="openSupportBtn" class="secondary" style="margin-top:0; flex:1;">🆘 Support</button>
+        <button id="openAbwesenheitBtn" class="secondary" style="margin-top:0;">🤒 Krank / Urlaub</button>
+        <button id="openFreikuvertBtn" class="secondary" style="margin-top:0;">✉️ Freikuvert</button>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <button id="openAssessmentEinstiegBtn" class="secondary" style="margin-top:0;">📋 Assessment</button>
+        <button id="openFaqBtn" class="secondary" style="margin-top:0;">❓ FAQ</button>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <button id="openSupportBtn" class="secondary" style="margin-top:0;">🆘 Support</button>
       </div>
     </div>
 
@@ -1987,6 +2886,8 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
       </div>
     </details>
 
+    ${renderBackupReminderAccordion(runtimeData)}
+
     <details class="accordion">
       <summary>
         <span>App zurücksetzen</span>
@@ -2003,6 +2904,7 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
   document.getElementById("openSettingsBtn").onclick = () => showSettingsView({ onLock });
   document.getElementById("openZeiterfassungBtn").onclick = () => showZeiterfassungView({ onLock });
   document.getElementById("openHomesBtn").onclick = () => showHomesView({ onLock });
+  document.getElementById("openPatientenBtn").onclick = () => showPatientenListeView({ onLock });
   document.getElementById("openAbgabeBtn").onclick = () => showAbgabeView({ onLock });
   document.getElementById("openNachbestellBtn").onclick = () => showNachbestellungView({ onLock });
   document.getElementById("openKilometerBtn").onclick = () => showKilometerView({ onLock });
@@ -2010,8 +2912,12 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
     window.open("./vorlagen/unterschriftenblatt.pdf", "_blank");
   };
   document.getElementById("openSupportBtn").onclick = () => {
-    window.open("https://www.physio-fast.de/support", "_blank");
+    window.open("https://physiofast.wixsite.com/fast-support", "_blank");
   };
+  document.getElementById("openAbwesenheitBtn").onclick = () => showAbwesenheitView({ onLock });
+  document.getElementById("openFreikuvertBtn").onclick = () => showFreikuvertView({ onLock });
+  document.getElementById("openAssessmentEinstiegBtn").onclick = () => showAssessmentEinrichtungAuswahlView({ onLock });
+  document.getElementById("openFaqBtn").onclick = () => showFaqView({ onLock });
 
   document.getElementById("openStundenkontoFromOverviewBtn").onclick = () => showStundenkontoView({ onLock });
 
@@ -2033,52 +2939,6 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
       }
     };
   });
-
-  const dashboardSaveTimeBtn = document.getElementById("dashboardSaveTimeBtn");
-  if (dashboardSaveTimeBtn) {
-    dashboardSaveTimeBtn.onclick = async () => {
-      const target = document.getElementById("dashboardTimeRezept").value.trim();
-      const date = document.getElementById("dashboardTimeDate").value.trim();
-      const minutesValue = document.getElementById("dashboardTimeMinutes").value.trim();
-      const note = document.getElementById("dashboardTimeNote").value.trim();
-      const msg = document.getElementById("dashboardTimeMsg");
-
-      msg.className = "error";
-      msg.textContent = "";
-
-      if (!target) {
-        msg.textContent = "Bitte zuerst ein Zielrezept auswählen.";
-        return;
-      }
-
-      const [homeId, patientId, rezeptId] = target.split("__");
-      const minutes = Number(minutesValue);
-      if (!Number.isFinite(minutes) || minutes <= 0) {
-        msg.textContent = "Bitte gültige Minuten für die Besprechung eingeben.";
-        return;
-      }
-
-      const approvalPin = window.prompt("Bitte PIN vom Abteilungsleiter eingeben:", "");
-      if (approvalPin !== "98918072") {
-        msg.textContent = "PIN vom Abteilungsleiter ist falsch.";
-        return;
-      }
-
-      try {
-        createRezeptTimeEntry(homeId, patientId, rezeptId, {
-          date,
-          minutes,
-          note,
-          confirmed: true
-        });
-        await queuePersistRuntimeData();
-        showDashboardView({ onLock });
-      } catch (err) {
-        console.error(err);
-        msg.textContent = "Besprechungszeit konnte nicht gespeichert werden.";
-      }
-    };
-  }
 
   document.getElementById("exportBackupBtn").onclick = async () => {
     const msg = document.getElementById("backupMsg");
@@ -2112,6 +2972,10 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
       msg.className = "error";
       msg.textContent = `Backup-Export fehlgeschlagen: ${err.message || err}`;
     }
+  };
+
+  document.getElementById("backupReminderNowBtn").onclick = () => {
+    showBackupReminderModal({ onDone: () => showDashboardView({ onLock, keepOverviewOpen: true }) });
   };
 
   document.getElementById("importBackupBtn").onclick = () => {
@@ -2148,6 +3012,57 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
       msg.textContent = err?.message || "Daten konnten nicht gelöscht werden.";
     }
   };
+
+  document.querySelectorAll(".klaereZuzahlungBtn").forEach((btn) => {
+    btn.onclick = () => {
+      showZuzahlungsabfrageView({
+        onLock,
+        homeId: btn.dataset.homeId,
+        patientId: btn.dataset.patientId,
+        onDone: () => showDashboardView({ onLock })
+      });
+    };
+  });
+
+  document.querySelectorAll(".assessmentJetztDurchfuehrenBtn").forEach((btn) => {
+    btn.onclick = () => {
+      showAssessmentAbfrageView({
+        onLock,
+        homeId: btn.dataset.homeId,
+        patientId: btn.dataset.patientId,
+        onDone: () => showDashboardView({ onLock })
+      });
+    };
+  });
+
+  document.querySelectorAll(".assessmentVerschiebenBtn").forEach((btn) => {
+    btn.onclick = async () => {
+      const neuesDatum = window.prompt("Assessment auf welches Datum verschieben? (TT.MM.JJJJ)", "");
+      if (neuesDatum === null) return;
+      const parsed = parseDeDate(neuesDatum);
+      if (!parsed) {
+        alert("Bitte ein gültiges Datum im Format TT.MM.JJJJ eingeben.");
+        return;
+      }
+      try {
+        scheduleAssessment(btn.dataset.homeId, btn.dataset.patientId, parsed);
+        await queuePersistRuntimeData();
+        showDashboardView({ onLock });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || "Termin konnte nicht verschoben werden.");
+      }
+    };
+  });
+
+  // Die angezeigten Erinnerungen gelten als "zugestellt" und werden erst in
+  // 7 Tagen erneut fällig (siehe ZUZAHLUNG_REMINDER_INTERVAL_DAYS in homes.js).
+  if (zuzahlungErinnerungen.length > 0) {
+    zuzahlungErinnerungen.forEach((item) => {
+      acknowledgeZuzahlungReminder(item.homeId, item.patientId);
+    });
+    queuePersistRuntimeData().catch((err) => console.error(err));
+  }
 }
 
 export function showHomesView({ onLock, searchText = "" }) {
@@ -2185,6 +3100,9 @@ export function showHomesView({ onLock, searchText = "" }) {
               <label for="edit-home-address-${home.homeId}">Heimadresse</label>
               <input id="edit-home-address-${home.homeId}" type="text" value="${escapeHtml(home.adresse || "")}">
 
+              <label for="edit-home-email-${home.homeId}">Verwaltungs-E-Mail</label>
+              <input id="edit-home-email-${home.homeId}" type="email" value="${escapeHtml(home.verwaltungsEmail || "")}" placeholder="verwaltung@einrichtung.de">
+
               <div class="row">
                 <button class="saveHomeEditBtn" data-home-id="${home.homeId}">Speichern</button>
                 <button class="deleteHomeBtn danger" data-home-id="${home.homeId}">Heim löschen</button>
@@ -2207,6 +3125,9 @@ export function showHomesView({ onLock, searchText = "" }) {
           <label for="homeAddress">Adresse</label>
           <input id="homeAddress" type="text">
 
+          <label for="homeVerwaltungsEmail">Verwaltungs-E-Mail</label>
+          <input id="homeVerwaltungsEmail" type="email" placeholder="verwaltung@einrichtung.de">
+
           <button id="createHomeBtn">Heim speichern</button>
           <div id="homeMsg"></div>
         </div>
@@ -2221,6 +3142,7 @@ export function showHomesView({ onLock, searchText = "" }) {
   document.getElementById("createHomeBtn").onclick = async () => {
     const name = document.getElementById("homeName").value.trim();
     const adresse = document.getElementById("homeAddress").value.trim();
+    const verwaltungsEmail = document.getElementById("homeVerwaltungsEmail").value.trim();
     const msg = document.getElementById("homeMsg");
 
     msg.className = "error";
@@ -2232,7 +3154,7 @@ export function showHomesView({ onLock, searchText = "" }) {
     }
 
     try {
-      createHome({ name, adresse });
+      createHome({ name, adresse, verwaltungsEmail });
       await queuePersistRuntimeData();
       showHomesView({ onLock });
     } catch (err) {
@@ -2266,6 +3188,7 @@ export function showHomesView({ onLock, searchText = "" }) {
       const homeId = btn.dataset.homeId;
       const name = document.getElementById(`edit-home-name-${homeId}`).value.trim();
       const adresse = document.getElementById(`edit-home-address-${homeId}`).value.trim();
+      const verwaltungsEmail = document.getElementById(`edit-home-email-${homeId}`).value.trim();
       const msg = document.getElementById(`home-edit-msg-${homeId}`);
 
       msg.className = "error";
@@ -2282,6 +3205,7 @@ export function showHomesView({ onLock, searchText = "" }) {
           if (!home) throw new Error("Heim nicht gefunden");
           home.name = name;
           home.adresse = adresse;
+          home.verwaltungsEmail = verwaltungsEmail;
         });
         await queuePersistRuntimeData();
         showHomesView({ onLock });
@@ -2307,6 +3231,105 @@ export function showHomesView({ onLock, searchText = "" }) {
         console.error(err);
         alert(err?.message || "Heim konnte nicht gelöscht werden.");
       }
+    };
+  });
+}
+
+// Sammelt alle Patienten über alle Einrichtungen hinweg für die
+// alphabetische Patienten-Gesamtliste (Dashboard-Button "Patienten").
+function collectAllPatients(data) {
+  const results = [];
+  (data?.homes || []).forEach((home) => {
+    (home?.patients || []).forEach((patient) => {
+      if (isPatientDeceased(patient)) return;
+      results.push({ patient, homeId: home?.homeId || "", homeName: home?.name || "Ohne Name" });
+    });
+  });
+  return results.sort((a, b) => {
+    const aName = formatPatientName(a.patient);
+    const bName = formatPatientName(b.patient);
+    return collatorDE.compare(aName, bName);
+  });
+}
+
+export function showPatientenListeView({ onLock, searchText = "" } = {}) {
+  bindLockButton(onLock);
+  setCurrentView("patienten-liste", { searchText });
+
+  const runtimeData = getRuntimeData();
+  const q = String(searchText || "").trim().toLowerCase();
+  const allPatients = collectAllPatients(runtimeData).filter(({ patient, homeName }) => {
+    if (!q) return true;
+    const haystack = [patient.firstName, patient.lastName, patient.birthDate, homeName].join(" ").toLowerCase();
+    return haystack.includes(q);
+  });
+
+  render(`
+    <div class="card">
+      <h2>Patienten</h2>
+      <p class="muted">${allPatients.length} Patient(en) über alle Einrichtungen, alphabetisch sortiert.</p>
+      <button id="backDashboardBtn" class="secondary">Zurück zum Dashboard</button>
+    </div>
+
+    <div class="card">
+      <label for="patientenListeSearch">Suche nach Name, Geburtsdatum oder Einrichtung</label>
+      <input id="patientenListeSearch" type="text" value="${escapeHtml(searchText)}" placeholder="z.B. Müller oder Heim Sonnenschein">
+      <div class="row">
+        <button id="runPatientenListeSearchBtn" class="secondary">Suchen</button>
+        <button id="clearPatientenListeSearchBtn" class="secondary">Suche löschen</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="list-stack">
+        ${allPatients.length === 0 ? `<p class="muted">Keine passenden Patienten gefunden.</p>` : ""}
+        ${allPatients.map(({ patient, homeId, homeName }) => `
+          <div class="compact-card">
+            <div style="font-weight:600;">${escapeHtml(formatPatientName(patient) || "Ohne Namen")}</div>
+            <div class="compact-meta" style="margin-bottom:8px;">${escapeHtml(homeName)}${patient.birthDate ? ` · geb. ${escapeHtml(patient.birthDate)}` : ""}</div>
+            <div class="inline-action-stack">
+              <button class="openPatientFromListeBtn secondary" data-home-id="${escapeHtml(homeId)}" data-patient-id="${escapeHtml(patient.patientId)}">Rezept</button>
+              <button class="openOptimierungFromListeBtn secondary" data-home-id="${escapeHtml(homeId)}" data-patient-id="${escapeHtml(patient.patientId)}">Rezeptoptimierer</button>
+            </div>
+            <div class="inline-action-stack" style="margin-top:8px;">
+              <button class="openArztberichtFromListeBtn secondary" data-home-id="${escapeHtml(homeId)}" data-patient-id="${escapeHtml(patient.patientId)}">Arztbericht</button>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `);
+
+  document.getElementById("backDashboardBtn").onclick = () => showDashboardView({ onLock });
+
+  const runSearch = () => {
+    showPatientenListeView({ onLock, searchText: document.getElementById("patientenListeSearch").value });
+  };
+  document.getElementById("runPatientenListeSearchBtn").onclick = runSearch;
+  document.getElementById("patientenListeSearch").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") runSearch();
+  });
+  document.getElementById("clearPatientenListeSearchBtn").onclick = () => {
+    showPatientenListeView({ onLock, searchText: "" });
+  };
+
+  document.querySelectorAll(".openPatientFromListeBtn").forEach((btn) => {
+    btn.onclick = () => {
+      showPatientDetailView({ onLock, homeId: btn.dataset.homeId, patientId: btn.dataset.patientId });
+    };
+  });
+  document.querySelectorAll(".openOptimierungFromListeBtn").forEach((btn) => {
+    btn.onclick = () => {
+      showRezeptoptimierungView({ onLock, homeId: btn.dataset.homeId, patientId: btn.dataset.patientId });
+    };
+  });
+
+  // Schnellzugriff: Dashboard -> Patienten -> Patient -> "Arztbericht" -
+  // ersetzt den bisherigen Umweg über die Einrichtung (Einrichtung ->
+  // Patient -> Arztbericht-Bereich -> Rezept auswählen).
+  document.querySelectorAll(".openArztberichtFromListeBtn").forEach((btn) => {
+    btn.onclick = () => {
+      showArztberichtView({ onLock, homeId: btn.dataset.homeId, patientId: btn.dataset.patientId, searchText });
     };
   });
 }
@@ -2337,8 +3360,8 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
 
       <details class="accordion">
         <summary>
-          <span>Suche und Patient anlegen</span>
-          <span class="muted">Suche + neuer Patient</span>
+          <span>Suche</span>
+          <span class="muted">Nach Name oder Geburtsdatum</span>
         </summary>
         <div class="accordion-body">
           <label for="patientSearch">Suche nach Name oder Geburtsdatum</label>
@@ -2348,26 +3371,10 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
             <button id="runPatientSearchBtn" class="secondary">Suchen</button>
             <button id="clearPatientSearchBtn" class="secondary">Suche löschen</button>
           </div>
-
-          <label for="lastName">Nachname</label>
-          <input id="lastName" type="text">
-
-          <label for="firstName">Vorname</label>
-          <input id="firstName" type="text">
-
-          <label for="birthDate">Geburtsdatum</label>
-          <input id="birthDate" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
-
-          <div class="checkbox-row">
-            <label class="check-chip"><input id="befreit" type="checkbox"> <span>Befreit</span></label>
-            <label class="check-chip"><input id="hb" type="checkbox"> <span>Hausbesuch</span></label>
-            <label class="check-chip"><input id="verstorben" type="checkbox"> <span>Verstorben</span></label>
-          </div>
-
-          <button id="createPatientBtn">Patient speichern</button>
-          <div id="patientMsg"></div>
         </div>
       </details>
+
+      <button id="openCreatePatientRezeptBtn" style="margin-top:12px;">Neuen Patienten + Rezept anlegen</button>
 
       <div class="list-stack" style="margin-top:12px;">
         ${filteredPatients.length === 0 ? `<p class="muted">Keine passenden Patienten gefunden.</p>` : ""}
@@ -2393,7 +3400,6 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
                 </div>
                 <div class="inline-action-stack" style="margin-bottom:12px;">
                   <button class="patientSectionBtn secondary" data-target="patient-schnelldoku-${patient.patientId}">SchnellDoku</button>
-                  <button class="patientSectionBtn secondary" data-target="patient-arztbericht-${patient.patientId}">Arztbericht</button>
                 </div>
 
                 <div id="patient-rezepte-${patient.patientId}" class="patient-inline-section" style="display:none; margin-bottom:12px;">
@@ -2468,50 +3474,6 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
                   <div id="quickDocMsg-${patient.patientId}"></div>
                 </div>
 
-                <div id="patient-arztbericht-${patient.patientId}" class="patient-inline-section" style="display:none; margin-bottom:12px;">
-                  ${rezepte.length === 0 ? `<p class="muted">Keine Rezepte für Arztberichte vorhanden.</p>` : `
-                    <div class="list-stack">
-                      ${rezepte.map(rezept => {
-                        const reportCount = ensureDoctorReportsState(rezept).length;
-                        const reports = [...ensureDoctorReportsState(rezept)].sort((a, b) => String(b?.createdAt || '').localeCompare(String(a?.createdAt || '')));
-                        return `
-                          <details class="accordion" style="margin-bottom:8px;">
-                            <summary>
-                              <span>${escapeHtml(rezeptSummary(rezept))}</span>
-                              <span class="muted">${reportCount} Bericht(e)</span>
-                            </summary>
-                            <div class="accordion-body">
-                              <div class="compact-meta" style="margin-bottom:10px;">
-                                Arzt: ${escapeHtml(rezept.arzt || '—')}<br>
-                                Ausstellung: ${escapeHtml(rezept.ausstell || '—')}<br>
-                                Aktuelles Datum wird beim Anlegen automatisch gesetzt.
-                              </div>
-                              <div class="row" style="margin-bottom:10px;">
-                                <button class="createDoctorReportBtn" data-patient-id="${patient.patientId}" data-rezept-id="${rezept.rezeptId}">Neuen Arztbericht erstellen</button>
-                              </div>
-                              ${reports.length === 0 ? `<p class="muted">Noch keine Arztberichte gespeichert.</p>` : `
-                                <div class="list-stack">
-                                  ${reports.map(report => `
-                                    <div class="compact-card" style="padding:14px;">
-                                      <div class="row" style="justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
-                                        <div>
-                                          <div style="font-weight:700;">${escapeHtml(formatIsoDateShort(report.createdAt))}</div>
-                                          <div class="compact-meta">Zuletzt geändert: ${escapeHtml(formatIsoDateShort(report.updatedAt || report.createdAt))}</div>
-                                        </div>
-                                        <button class="openDoctorReportBtn secondary" data-patient-id="${patient.patientId}" data-rezept-id="${rezept.rezeptId}" data-report-id="${report.reportId}">Öffnen</button>
-                                      </div>
-                                    </div>
-                                  `).join('')}
-                                </div>
-                              `}
-                            </div>
-                          </details>
-                        `;
-                      }).join('')}
-                    </div>
-                  `}
-                </div>
-
                 <div id="patient-stammdaten-${patient.patientId}" class="patient-inline-section" style="display:none;">
                   <label for="edit-lastName-${patient.patientId}">Nachname</label>
                   <input id="edit-lastName-${patient.patientId}" type="text" value="${escapeHtml(patient.lastName || "")}">
@@ -2523,10 +3485,13 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
                   <input id="edit-birthDate-${patient.patientId}" type="text" value="${escapeHtml(patient.birthDate || "")}" inputmode="numeric" placeholder="TT.MM.JJJJ">
 
                   <div class="checkbox-row">
-                    <label class="check-chip"><input id="edit-befreit-${patient.patientId}" type="checkbox" ${patient.befreit ? "checked" : ""}> <span>Befreit</span></label>
                     <label class="check-chip"><input id="edit-hb-${patient.patientId}" type="checkbox" ${patient.hb ? "checked" : ""}> <span>Hausbesuch</span></label>
                     <label class="check-chip"><input id="edit-verstorben-${patient.patientId}" type="checkbox" ${patient.verstorben ? "checked" : ""}> <span>Verstorben</span></label>
                   </div>
+
+                  <label for="edit-zuzahlungsstatus-${patient.patientId}">Zuzahlungsstatus</label>
+                  ${renderZuzahlungsstatusSelect(`edit-zuzahlungsstatus-${patient.patientId}`, patient.zuzahlungsstatus || "")}
+                  <p class="muted">Bitte mit Stationsleitung oder Büro klären. Bei "Noch nicht geklärt" erinnert die App wöchentlich.</p>
 
                   <button class="savePatientDataBtn" data-patient-id="${patient.patientId}">Stammdaten speichern</button>
                   <div id="patient-edit-msg-${patient.patientId}"></div>
@@ -2552,44 +3517,13 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
     showHomeDetailView({ onLock, homeId, searchText: "" });
   };
 
-  bindDateAutoFormat(document.getElementById("birthDate"));
   document.querySelectorAll('[id^="edit-birthDate-"]').forEach((el) => bindDateAutoFormat(el));
   bindCheckChipToggles(app);
   bindQuickDocSelectionStyles(app);
   bindSelectableCardChecks(app);
 
-  document.getElementById("createPatientBtn").onclick = async () => {
-    const firstName = document.getElementById("firstName").value.trim();
-    const lastName = document.getElementById("lastName").value.trim();
-    const birthDate = document.getElementById("birthDate").value.trim();
-    const befreit = document.getElementById("befreit").checked;
-    const hb = document.getElementById("hb").checked;
-    const verstorben = document.getElementById("verstorben").checked;
-    const msg = document.getElementById("patientMsg");
-
-    msg.className = "error";
-    msg.textContent = "";
-
-    if (!firstName && !lastName) {
-      msg.textContent = "Bitte mindestens einen Namen eingeben.";
-      return;
-    }
-
-    try {
-      createPatient(homeId, {
-        firstName,
-        lastName,
-        birthDate,
-        befreit,
-        hb,
-        verstorben
-      });
-      await queuePersistRuntimeData();
-      showHomeDetailView({ onLock, homeId, searchText });
-    } catch (err) {
-      console.error(err);
-      msg.textContent = "Patient konnte nicht gespeichert werden.";
-    }
+  document.getElementById("openCreatePatientRezeptBtn").onclick = () => {
+    showCreatePatientRezeptView({ onLock, homeId, searchText });
   };
 
   document.querySelectorAll('.patientSectionBtn').forEach((btn) => {
@@ -2687,57 +3621,6 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
     };
   });
 
-  document.querySelectorAll('.createDoctorReportBtn').forEach((btn) => {
-    btn.onclick = async () => {
-      try {
-        let createdReportId = '';
-        mutateRuntimeData((data) => {
-          const currentHome = getHomeById(data, homeId);
-          const currentPatient = getPatientById(currentHome, btn.dataset.patientId);
-          const rezept = getRezeptById(currentPatient, btn.dataset.rezeptId);
-          if (!currentPatient || !rezept) throw new Error('Rezept nicht gefunden');
-          const reports = ensureDoctorReportsState(rezept);
-          const now = new Date().toISOString();
-          createdReportId = `report_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-          reports.unshift({
-            reportId: createdReportId,
-            content: buildDoctorReportTemplate({
-              patient: { ...currentPatient, homeName: currentHome?.name || '' },
-              rezept
-            }),
-            createdAt: now,
-            updatedAt: now
-          });
-        });
-        await queuePersistRuntimeData();
-        showDoctorReportEditorView({
-          onLock,
-          homeId,
-          patientId: btn.dataset.patientId,
-          rezeptId: btn.dataset.rezeptId,
-          reportId: createdReportId,
-          searchText
-        });
-      } catch (err) {
-        console.error(err);
-        alert(err?.message || 'Arztbericht konnte nicht erstellt werden.');
-      }
-    };
-  });
-
-  document.querySelectorAll('.openDoctorReportBtn').forEach((btn) => {
-    btn.onclick = () => {
-      showDoctorReportEditorView({
-        onLock,
-        homeId,
-        patientId: btn.dataset.patientId,
-        rezeptId: btn.dataset.rezeptId,
-        reportId: btn.dataset.reportId,
-        searchText
-      });
-    };
-  });
-
   document.querySelectorAll('.savePatientDataBtn').forEach((btn) => {
     btn.onclick = async () => {
       const patientId = btn.dataset.patientId;
@@ -2750,10 +3633,16 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
           firstName: document.getElementById(`edit-firstName-${patientId}`).value.trim(),
           lastName: document.getElementById(`edit-lastName-${patientId}`).value.trim(),
           birthDate: document.getElementById(`edit-birthDate-${patientId}`).value.trim(),
-          befreit: document.getElementById(`edit-befreit-${patientId}`).checked,
           hb: document.getElementById(`edit-hb-${patientId}`).checked,
           verstorben: document.getElementById(`edit-verstorben-${patientId}`).checked
         });
+
+        const currentPatient = getPatientById(getHomeById(getRuntimeData(), homeId), patientId);
+        const nextZuzahlungsstatus = document.getElementById(`edit-zuzahlungsstatus-${patientId}`).value;
+        if (nextZuzahlungsstatus && nextZuzahlungsstatus !== currentPatient?.zuzahlungsstatus) {
+          setZuzahlungsstatus(homeId, patientId, nextZuzahlungsstatus);
+        }
+
         await queuePersistRuntimeData();
         showHomeDetailView({ onLock, homeId, searchText });
       } catch (err) {
@@ -2767,7 +3656,7 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
     btn.onclick = async () => {
       const patientId = btn.dataset.patientId;
       const patient = (home.patients || []).find((p) => p.patientId === patientId);
-      const patientLabel = patient ? `${patient.firstName} ${patient.lastName}`.trim() || "Patient" : "Patient";
+      const patientLabel = patient ? formatPatientName(patient) || "Patient" : "Patient";
       const ok = confirm(`${patientLabel} wirklich löschen? Alle Rezepte und Dokumentationen dieses Patienten werden ebenfalls gelöscht.`);
       if (!ok) return;
 
@@ -2783,8 +3672,118 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
   });
 }
 
+// Übersicht aller Rezepte + Arztberichte eines Patienten (Neu anlegen und
+// bestehende öffnen). Direkt erreichbar über den "Arztbericht"-Button in
+// der Patientenliste (Dashboard -> Patienten) - ersetzt den bisherigen
+// Weg über Einrichtung -> Patient -> Arztbericht-Bereich -> Rezept
+// auswählen (Aufgabe 6: "Schnellerer Zugriff").
+export function showArztberichtView({ onLock, homeId, patientId, searchText = "" }) {
+  bindLockButton(onLock);
+  setCurrentView("arztbericht-uebersicht", { homeId, patientId, searchText });
 
-export function showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId, reportId, searchText = "" }) {
+  const runtimeData = getRuntimeData();
+  const home = getHomeById(runtimeData, homeId);
+  const patient = getPatientById(home, patientId);
+
+  if (!home || !patient) {
+    showPatientenListeView({ onLock, searchText });
+    return;
+  }
+
+  const rezepte = sortRezepteForDisplay(patient.rezepte || []);
+  const patientName = formatPatientName(patient) || "Patient/in";
+
+  render(`
+    <div class="card">
+      <h2>Arztberichte</h2>
+      <p class="muted">Patient: ${escapeHtml(patientName)}</p>
+      <button id="backFromArztberichtBtn" class="secondary">Zurück zur Patientenliste</button>
+    </div>
+
+    <div class="card">
+      ${rezepte.length === 0 ? `<p class="muted">Keine Rezepte für Arztberichte vorhanden. Bitte zuerst ein Rezept anlegen.</p>` : `
+        <div class="list-stack">
+          ${rezepte.map((rezept, idx) => {
+            const reportCount = ensureDoctorReportsState(rezept).length;
+            const reports = [...ensureDoctorReportsState(rezept)].sort((a, b) => String(b?.createdAt || "").localeCompare(String(a?.createdAt || "")));
+            return `
+              <details class="accordion" style="margin-bottom:8px;" ${idx === 0 ? "open" : ""}>
+                <summary>
+                  <span>${escapeHtml(rezeptSummary(rezept))}</span>
+                  <span class="muted">${reportCount} Bericht(e)</span>
+                </summary>
+                <div class="accordion-body">
+                  <div class="compact-meta" style="margin-bottom:10px;">
+                    Arzt: ${escapeHtml(rezept.arzt || "—")}<br>
+                    Ausstellung: ${escapeHtml(rezept.ausstell || "—")}<br>
+                    Aktuelles Datum wird beim Anlegen automatisch gesetzt.
+                  </div>
+                  <div class="row" style="margin-bottom:10px;">
+                    <button class="createDoctorReportBtn" data-patient-id="${patient.patientId}" data-rezept-id="${rezept.rezeptId}">Neuen Arztbericht erstellen</button>
+                  </div>
+                  ${reports.length === 0 ? `<p class="muted">Noch keine Arztberichte gespeichert.</p>` : `
+                    <div class="list-stack">
+                      ${reports.map((report) => `
+                        <div class="compact-card" style="padding:14px;">
+                          <div class="row" style="justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
+                            <div>
+                              <div style="font-weight:700;">${escapeHtml(formatIsoDateShort(report.createdAt))}</div>
+                              <div class="compact-meta">Zuletzt geändert: ${escapeHtml(formatIsoDateShort(report.updatedAt || report.createdAt))}</div>
+                            </div>
+                            <button class="openDoctorReportBtn secondary" data-patient-id="${patient.patientId}" data-rezept-id="${rezept.rezeptId}" data-report-id="${report.reportId}">Öffnen</button>
+                          </div>
+                        </div>
+                      `).join("")}
+                    </div>
+                  `}
+                </div>
+              </details>
+            `;
+          }).join("")}
+        </div>
+      `}
+    </div>
+  `);
+
+  document.getElementById("backFromArztberichtBtn").onclick = () => {
+    showPatientenListeView({ onLock, searchText });
+  };
+
+  document.querySelectorAll(".createDoctorReportBtn").forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        const createdReportId = createDoctorReportForRezept(homeId, btn.dataset.patientId, btn.dataset.rezeptId);
+        await queuePersistRuntimeData();
+        showDoctorReportEditorView({
+          onLock,
+          homeId,
+          patientId: btn.dataset.patientId,
+          rezeptId: btn.dataset.rezeptId,
+          reportId: createdReportId,
+          searchText
+        });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || "Arztbericht konnte nicht erstellt werden.");
+      }
+    };
+  });
+
+  document.querySelectorAll(".openDoctorReportBtn").forEach((btn) => {
+    btn.onclick = () => {
+      showDoctorReportEditorView({
+        onLock,
+        homeId,
+        patientId: btn.dataset.patientId,
+        rezeptId: btn.dataset.rezeptId,
+        reportId: btn.dataset.reportId,
+        searchText
+      });
+    };
+  });
+}
+
+export function showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId, reportId, searchText = "", successMsg = "" }) {
   bindLockButton(onLock);
   setCurrentView("doctor-report-editor", { homeId, patientId, rezeptId, reportId, searchText });
 
@@ -2799,11 +3798,13 @@ export function showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId
     return;
   }
 
-  const patientName = `${patient.firstName || ''} ${patient.lastName || ''}`.trim() || 'Patient/in';
+  const patientName = formatPatientName(patient) || 'Patient/in';
+  const introLine = buildDoctorReportIntroLine(patient);
+  const allAssessmentsHtml = buildAllAssessmentsReportHtml(patient);
 
   render(`
     <div class="card">
-      <h2>Arztbericht</h2>
+      <h2>Therapiebericht</h2>
       <p class="muted">Patient: ${escapeHtml(patientName)} · Rezept: ${escapeHtml(rezeptSummary(rezept))}</p>
       <button id="backDoctorReportBtn" class="secondary">Zurück zur Patientenübersicht</button>
     </div>
@@ -2817,23 +3818,80 @@ export function showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId
         <div class="muted" style="text-align:right;">Arzt: ${escapeHtml(rezept.arzt || '—')}<br>Verordnung vom ${escapeHtml(rezept.ausstell || '—')}</div>
       </div>
 
-      <label for="doctorReportEditorText">Arztbericht</label>
-      <div class="compact-card" style="margin-bottom:14px; padding:16px;">
-        <textarea id="doctorReportEditorText" rows="22" style="width:100%; border:none; outline:none; resize:vertical; background:transparent; font:inherit; color:inherit; min-height:560px; line-height:1.5;">${escapeHtml(report.content || '')}</textarea>
+      <h3>Einleitung (automatisch)</h3>
+      <div class="compact-card">
+        <p style="margin:0;">${escapeHtml(introLine)}</p>
       </div>
 
-      <div class="row" style="margin-bottom:8px; flex-wrap:wrap;">
+      <h3 style="margin-top:20px;">Teil 1 – Assessment-Verlauf (automatisch, alle bisherigen Assessments)</h3>
+      <div class="compact-card">
+        ${allAssessmentsHtml}
+      </div>
+
+      <h3 style="margin-top:20px;">Teil 2 – Geführte Eingabe</h3>
+      <label>Therapieziel (Mehrfachauswahl)</label>
+      ${renderCheckboxList('therapieziel', Assessment.THERAPIEZIEL_OPTIONEN, report.therapieziele)}
+      <label for="therapiezielFreitext">Sonstiges Therapieziel (optional)</label>
+      <input id="therapiezielFreitext" type="text" value="${escapeHtml(report.therapiezielFreitext || '')}">
+
+      <label style="margin-top:14px;">Patientencompliance</label>
+      ${renderRadioGroup('compliance', Assessment.COMPLIANCE_OPTIONEN, report.compliance)}
+      <label for="complianceFreitext">Anmerkung zur Compliance (optional)</label>
+      <input id="complianceFreitext" type="text" value="${escapeHtml(report.complianceFreitext || '')}">
+
+      <label style="margin-top:14px;">Verlauf</label>
+      ${renderRadioGroup('verlauf', Assessment.VERLAUF_OPTIONEN, report.verlauf)}
+      <label for="verlaufFreitext">Anmerkung zum Verlauf (optional)</label>
+      <input id="verlaufFreitext" type="text" value="${escapeHtml(report.verlaufFreitext || '')}">
+
+      <label style="margin-top:14px;">Soll die Therapie weitergeführt werden?</label>
+      ${renderRadioGroup('therapieWeiterfuehren', Assessment.THERAPIE_WEITERFUEHREN_OPTIONEN, report.therapieWeiterfuehren)}
+
+      <label style="margin-top:14px;">Bringt die Therapie Nutzen?</label>
+      ${renderRadioGroup('therapieNutzen', Assessment.THERAPIE_NUTZEN_OPTIONEN, report.therapieNutzen)}
+
+      <h3 style="margin-top:20px;">Teil 3 – Freitext</h3>
+      <label for="therapieText">Therapie (Pflichtfeld) – was wurde in der Therapie gemacht</label>
+      <textarea id="therapieText" rows="6">${escapeHtml(report.therapieText || '')}</textarea>
+
+      <label for="bemerkungen">Bemerkungen (optional)</label>
+      <textarea id="bemerkungen" rows="4">${escapeHtml(report.bemerkungen || '')}</textarea>
+
+      ${report.content ? `
+        <details class="accordion" style="margin-top:16px;">
+          <summary><span>Alter Berichtstext (vor Umstellung)</span><span class="muted">anzeigen</span></summary>
+          <div class="accordion-body"><pre style="white-space:pre-wrap; font:inherit; margin:0;">${escapeHtml(report.content)}</pre></div>
+        </details>
+      ` : ''}
+
+      <div class="row" style="margin-top:16px; flex-wrap:wrap;">
         <button id="saveDoctorReportEditorBtn">Speichern</button>
-        <button id="printDoctorReportEditorBtn" class="secondary">Drucken</button>
+        <button id="printDoctorReportEditorBtn" class="secondary">PDF / Drucken</button>
         <button id="deleteDoctorReportEditorBtn" class="secondary">Löschen</button>
       </div>
-      <div id="doctorReportEditorMsg"></div>
+      <div id="doctorReportEditorMsg" class="${successMsg ? 'success' : ''}">${escapeHtml(successMsg)}</div>
     </div>
   `);
+  bindCheckChipToggles(app);
 
   document.getElementById('backDoctorReportBtn').onclick = () => {
-    showHomeDetailView({ onLock, homeId, searchText });
+    showArztberichtView({ onLock, homeId, patientId, searchText });
   };
+
+  function collectReportFormValues() {
+    return {
+      therapieziele: getCheckboxListValues('therapieziel'),
+      therapiezielFreitext: document.getElementById('therapiezielFreitext').value.trim(),
+      compliance: getRadioValue('compliance'),
+      complianceFreitext: document.getElementById('complianceFreitext').value.trim(),
+      verlauf: getRadioValue('verlauf'),
+      verlaufFreitext: document.getElementById('verlaufFreitext').value.trim(),
+      therapieWeiterfuehren: getRadioValue('therapieWeiterfuehren'),
+      therapieNutzen: getRadioValue('therapieNutzen'),
+      therapieText: document.getElementById('therapieText').value.trim(),
+      bemerkungen: document.getElementById('bemerkungen').value.trim()
+    };
+  }
 
   document.getElementById('saveDoctorReportEditorBtn').onclick = async () => {
     const msg = document.getElementById('doctorReportEditorMsg');
@@ -2841,9 +3899,9 @@ export function showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId
     msg.textContent = '';
 
     try {
-      const content = document.getElementById('doctorReportEditorText').value.trim();
-      if (!content) {
-        msg.textContent = 'Bitte einen Berichtstext eingeben.';
+      const values = collectReportFormValues();
+      if (!values.therapieText) {
+        msg.textContent = 'Bitte das Feld "Therapie" ausfüllen.';
         return;
       }
 
@@ -2853,16 +3911,14 @@ export function showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId
         const currentRezept = getRezeptById(currentPatient, rezeptId);
         const currentReport = ensureDoctorReportsState(currentRezept).find((item) => item.reportId === reportId);
         if (!currentReport) throw new Error('Bericht nicht gefunden');
-        currentReport.content = content;
+        Object.assign(currentReport, values);
         currentReport.updatedAt = new Date().toISOString();
       });
       await queuePersistRuntimeData();
-      msg.className = 'success';
-      msg.textContent = 'Arztbericht gespeichert.';
-      showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId, reportId, searchText });
+      showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId, reportId, searchText, successMsg: 'Therapiebericht gespeichert.' });
     } catch (err) {
       console.error(err);
-      msg.textContent = 'Arztbericht konnte nicht gespeichert werden.';
+      msg.textContent = 'Therapiebericht konnte nicht gespeichert werden.';
     }
   };
 
@@ -2873,12 +3929,9 @@ export function showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId
       const currentRezept = getRezeptById(currentPatient, rezeptId);
       const currentReport = ensureDoctorReportsState(currentRezept).find((item) => item.reportId === reportId);
       if (!currentHome || !currentPatient || !currentRezept || !currentReport) throw new Error('Bericht nicht gefunden');
-      const previewReport = {
-        ...currentReport,
-        content: document.getElementById('doctorReportEditorText').value.trim() || currentReport.content || ''
-      };
+      const previewReport = { ...currentReport, ...collectReportFormValues() };
       openLetterPreview(
-        `Arztbericht ${currentPatient.lastName || ''}`.trim(),
+        `Therapiebericht ${currentPatient.lastName || ''}`.trim(),
         renderDoctorReportPrintHtml({
           settings: getRuntimeData()?.settings || {},
           patient: { ...currentPatient, homeName: currentHome?.name || '' },
@@ -2888,7 +3941,7 @@ export function showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId
       );
     } catch (err) {
       console.error(err);
-      alert(err?.message || 'Arztbericht konnte nicht gedruckt werden.');
+      alert(err?.message || 'Therapiebericht konnte nicht gedruckt werden.');
     }
   };
 
@@ -2903,12 +3956,1179 @@ export function showDoctorReportEditorView({ onLock, homeId, patientId, rezeptId
         currentRezept.doctorReports = reports.filter((item) => item.reportId !== reportId);
       });
       await queuePersistRuntimeData();
-      showHomeDetailView({ onLock, homeId, searchText });
+      showArztberichtView({ onLock, homeId, patientId, searchText });
     } catch (err) {
       console.error(err);
       alert(err?.message || 'Arztbericht konnte nicht gelöscht werden.');
     }
   };
+}
+
+// Kombinierter Flow: Patient anlegen und Rezept anlegen in einem Schritt
+// (statt wie bisher zwei getrennte Vorgänge). Nur manuelle Eingabe (die
+// vormalige Fotoerkennung per Kamera/Tesseract.js OCR wurde auf
+// Nutzerwunsch komplett entfernt).
+export function showCreatePatientRezeptView({ onLock, homeId, searchText = "" }) {
+  bindLockButton(onLock);
+  setCurrentView("create-patient-rezept", { homeId, searchText });
+
+  const runtimeData = getRuntimeData();
+  const home = getHomeById(runtimeData, homeId);
+  if (!home) {
+    showHomesView({ onLock });
+    return;
+  }
+
+  function renderCombinedForm() {
+    const arztRegistry = getArztRegistry(runtimeData);
+
+    render(`
+      <div class="card">
+        <h2>Neuen Patienten + Rezept anlegen</h2>
+        <p class="muted">${escapeHtml(home.name || "Einrichtung")}</p>
+        <button id="backToModeBtn" class="secondary">Zurück zum Heim</button>
+      </div>
+
+      <div class="card">
+        <h3>Patient</h3>
+        <label for="lastName">Nachname</label>
+        <input id="lastName" type="text" value="">
+
+        <label for="firstName">Vorname</label>
+        <input id="firstName" type="text" value="">
+
+        <label for="anrede">Anrede</label>
+        <select id="anrede">
+          <option value="">Keine Angabe</option>
+          <option value="frau">Frau</option>
+          <option value="herr">Herr</option>
+        </select>
+        <p class="muted">Wird für die automatische Anrede im Arztbericht genutzt.</p>
+
+        <label for="birthDate">Geburtsdatum</label>
+        <input id="birthDate" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric" value="">
+
+        <div class="checkbox-row">
+          <label class="check-chip"><input id="hb" type="checkbox"> <span>Hausbesuch</span></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Rezept</h3>
+        <label for="arzt">Arzt</label>
+        <input id="arzt" type="text" list="doctorSuggestions" autocomplete="off" value="">
+        <datalist id="doctorSuggestions">
+          ${getKnownDoctorNames(runtimeData).map((name) => `<option value="${escapeHtml(name)}"></option>`).join("")}
+        </datalist>
+
+        ${renderArztAdresseFields("")}
+
+        <label for="ausstell">Ausstellungsdatum</label>
+        <input id="ausstell" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric" value="">
+
+        <label for="icd10">ICD-10 Code</label>
+        <input id="icd10" type="text" placeholder="z.B. M54.5" value="">
+
+        <label for="icd10b">2. ICD-10 Code (optional)</label>
+        <input id="icd10b" type="text" placeholder="z.B. M54.5" value="">
+
+        ${renderLeitsymptomatikField("")}
+
+        <h3 style="margin-top:20px;">Leistungen</h3>
+        ${renderRezeptItemsEditor([])}
+
+        <h3 style="margin-top:20px;">Rezeptprüfung</h3>
+        <div class="checkbox-row">
+          <label class="check-chip"><input id="bg" type="checkbox"> <span>BG</span></label>
+          <label class="check-chip"><input id="dt" type="checkbox"> <span>Doppeltermin</span></label>
+          <label class="check-chip"><input id="dringend" type="checkbox"> <span>Dringender Bedarf</span></label>
+        </div>
+
+        <label for="hausbesuch">Hausbesuch (Rezeptvermerk)</label>
+        ${renderJaNeinSelect("hausbesuch", "")}
+
+        <label for="arztStempel">Arzt-Stempel vorhanden</label>
+        ${renderJaNeinSelect("arztStempel", "")}
+
+        <label for="arztUnterschrift">Arzt-Unterschrift vorhanden</label>
+        ${renderJaNeinSelect("arztUnterschrift", "")}
+
+        <div id="rezeptPruefungPanel" style="margin-top:16px;"></div>
+
+        <button id="saveCombinedBtn">Patient + Rezept speichern</button>
+        <div id="combinedMsg"></div>
+      </div>
+    `);
+
+    document.getElementById("backToModeBtn").onclick = () => {
+      showHomeDetailView({ onLock, homeId, searchText });
+    };
+
+    bindDateAutoFormat(document.getElementById("birthDate"));
+    bindDateAutoFormat(document.getElementById("ausstell"));
+    bindIcdAutoFormat(document.getElementById("icd10"));
+    bindIcdAutoFormat(document.getElementById("icd10b"));
+    bindRezeptItemsEditor([]);
+    bindCheckChipToggles(app);
+    bindQuickDocSelectionStyles(app);
+    bindSelectableCardChecks(app);
+    bindLeitsymptomatikField();
+    bindRezeptPruefungLive("rezeptPruefungPanel");
+
+    const arztInput = document.getElementById("arzt");
+    bindArztAdresseAutofill(arztInput, arztRegistry);
+
+    document.getElementById("saveCombinedBtn").onclick = async () => {
+      const msg = document.getElementById("combinedMsg");
+      msg.className = "error";
+      msg.textContent = "";
+
+      const firstName = document.getElementById("firstName").value.trim();
+      const lastName = document.getElementById("lastName").value.trim();
+      const anrede = document.getElementById("anrede").value;
+      const birthDate = document.getElementById("birthDate").value.trim();
+      const hb = document.getElementById("hb").checked;
+
+      if (!firstName && !lastName) {
+        msg.textContent = "Bitte mindestens einen Namen für den Patienten eingeben.";
+        return;
+      }
+
+      const rezeptPayload = collectRezeptFormPayload();
+      if (rezeptPayload.items.length === 0) {
+        msg.textContent = "Bitte mindestens eine Leistung angeben.";
+        return;
+      }
+
+      try {
+        const newPatientId = createPatient(homeId, {
+          firstName,
+          lastName,
+          anrede,
+          birthDate,
+          befreit: false,
+          hb
+        });
+        createRezept(homeId, newPatientId, rezeptPayload);
+        const arztAdresse = collectArztAdresseFromForm();
+        if (rezeptPayload.arzt && arztAdresse) {
+          upsertArztAdresse(rezeptPayload.arzt, arztAdresse);
+        }
+
+        await queuePersistRuntimeData();
+        showZuzahlungsabfrageView({
+          onLock,
+          homeId,
+          patientId: newPatientId,
+          searchText,
+          onDone: () => showAssessmentAbfrageView({ onLock, homeId, patientId: newPatientId, searchText })
+        });
+      } catch (err) {
+        console.error(err);
+        msg.textContent = "Patient/Rezept konnten nicht gespeichert werden.";
+      }
+    };
+  }
+
+  renderCombinedForm();
+}
+
+// Wird direkt nach dem Anlegen eines neuen Patienten aufgerufen (Funktion 3).
+// onDone erlaubt es, weitere Abfrage-Schritte anzuhängen (z.B. Funktion 7: Assessment).
+export function showZuzahlungsabfrageView({ onLock, homeId, patientId, searchText = "", onDone = null }) {
+  bindLockButton(onLock);
+  setCurrentView("zuzahlungsabfrage", { homeId, patientId });
+
+  const runtimeData = getRuntimeData();
+  const home = getHomeById(runtimeData, homeId);
+  const patient = getPatientById(home, patientId);
+
+  if (!home || !patient) {
+    showHomeDetailView({ onLock, homeId, searchText });
+    return;
+  }
+
+  const weiter = onDone || (() => showPatientDetailView({ onLock, homeId, patientId }));
+
+  render(`
+    <div class="card">
+      <h2>Zuzahlungsstatus</h2>
+      <p class="muted">Patient: ${escapeHtml(formatPatientName(patient) || "—")}</p>
+    </div>
+
+    <div class="card">
+      <h3>Ist der Patient zuzahlungsbefreit?</h3>
+      <p class="muted">Bitte mit Stationsleitung oder Büro klären.</p>
+
+      <div class="list-stack" style="margin-top:12px;">
+        <button id="zuzahlungJaBtn">Ja</button>
+        <button id="zuzahlungNeinBtn" class="secondary">Nein</button>
+        <button id="zuzahlungUngeklaertBtn" class="secondary">Noch nicht geklärt</button>
+      </div>
+      <div id="zuzahlungMsg"></div>
+    </div>
+  `);
+
+  async function waehleStatus(status) {
+    const msg = document.getElementById("zuzahlungMsg");
+    try {
+      setZuzahlungsstatus(homeId, patientId, status);
+      await queuePersistRuntimeData();
+      weiter();
+    } catch (err) {
+      console.error(err);
+      msg.className = "error";
+      msg.textContent = err?.message || "Zuzahlungsstatus konnte nicht gespeichert werden.";
+    }
+  }
+
+  document.getElementById("zuzahlungJaBtn").onclick = () => waehleStatus("ja");
+  document.getElementById("zuzahlungNeinBtn").onclick = () => waehleStatus("nein");
+  document.getElementById("zuzahlungUngeklaertBtn").onclick = () => waehleStatus("ungeklaert");
+}
+
+export function showAssessmentEinrichtungAuswahlView({ onLock }) {
+  bindLockButton(onLock);
+  setCurrentView("assessment-einrichtung-auswahl", {});
+
+  const runtimeData = getRuntimeData();
+  const homes = sortHomesAlpha(runtimeData?.homes || []);
+
+  render(`
+    <div class="card">
+      <h2>Assessment</h2>
+      <p class="muted">Einrichtung auswählen</p>
+      <button id="backDashboardBtn" class="secondary">Zurück zum Dashboard</button>
+    </div>
+
+    <div class="card">
+      <h3>Einrichtungen</h3>
+      <div class="list-stack">
+        ${homes.length === 0 ? `<p class="muted">Noch keine Einrichtungen vorhanden.</p>` : ""}
+        ${homes.map(home => `
+          <div class="compact-card assessment-home-open-card" data-home-id="${home.homeId}" style="cursor:pointer;">
+            <div style="font-weight:700;">${escapeHtml(home.name || "Ohne Name")}</div>
+            <div class="compact-meta">${(home.patients || []).filter((patient) => !isPatientDeceased(patient)).length} Patient(en)</div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `);
+
+  document.getElementById("backDashboardBtn").onclick = () => showDashboardView({ onLock });
+
+  document.querySelectorAll(".assessment-home-open-card").forEach((card) => {
+    card.onclick = () => showAssessmentPatientAuswahlView({ onLock, homeId: card.dataset.homeId });
+  });
+}
+
+export function showAssessmentPatientAuswahlView({ onLock, homeId, searchText = "" }) {
+  bindLockButton(onLock);
+  setCurrentView("assessment-patient-auswahl", { homeId, searchText });
+
+  const runtimeData = getRuntimeData();
+  const home = getHomeById(runtimeData, homeId);
+
+  if (!home) {
+    showAssessmentEinrichtungAuswahlView({ onLock });
+    return;
+  }
+
+  const filteredPatients = sortPatientsAlpha(searchPatientsInHome(home, searchText).filter((patient) => !isPatientDeceased(patient)));
+
+  render(`
+    <div class="card">
+      <h2>Assessment</h2>
+      <p class="muted">${escapeHtml(home.name || "Einrichtung")} – Patient auswählen</p>
+      <button id="backEinrichtungAuswahlBtn" class="secondary">Zurück zur Einrichtungsauswahl</button>
+    </div>
+
+    <div class="card">
+      <h3>Patienten</h3>
+      <label for="assessmentPatientSearch">Suche nach Name oder Geburtsdatum</label>
+      <input id="assessmentPatientSearch" type="text" value="${escapeHtml(searchText)}" placeholder="z.B. Müller oder 01.01.1950">
+      <div class="row">
+        <button id="runAssessmentPatientSearchBtn" class="secondary">Suchen</button>
+        <button id="clearAssessmentPatientSearchBtn" class="secondary">Suche löschen</button>
+      </div>
+
+      <div class="list-stack" style="margin-top:12px;">
+        ${filteredPatients.length === 0 ? `<p class="muted">Keine passenden Patienten gefunden.</p>` : ""}
+        ${filteredPatients.map(patient => `
+          <div class="compact-card assessment-patient-open-card" data-patient-id="${patient.patientId}" style="cursor:pointer;">
+            <div style="font-weight:700;">${escapeHtml(`${patient.lastName || ""}, ${patient.firstName || ""}`.replace(/^,\s*/, "").trim() || "Ohne Namen")}</div>
+            <div class="compact-meta">${patient.nextAssessmentDueAt ? `Nächstes Assessment fällig ab: ${escapeHtml(formatDeDate(patient.nextAssessmentDueAt))}` : "Kein Folge-Assessment geplant."}</div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `);
+
+  document.getElementById("backEinrichtungAuswahlBtn").onclick = () => showAssessmentEinrichtungAuswahlView({ onLock });
+
+  document.getElementById("runAssessmentPatientSearchBtn").onclick = () => {
+    showAssessmentPatientAuswahlView({ onLock, homeId, searchText: document.getElementById("assessmentPatientSearch").value.trim() });
+  };
+  document.getElementById("clearAssessmentPatientSearchBtn").onclick = () => {
+    showAssessmentPatientAuswahlView({ onLock, homeId, searchText: "" });
+  };
+
+  document.querySelectorAll(".assessment-patient-open-card").forEach((card) => {
+    card.onclick = () => {
+      showAssessmentAbfrageView({
+        onLock,
+        homeId,
+        patientId: card.dataset.patientId,
+        onDone: () => showAssessmentPatientAuswahlView({ onLock, homeId })
+      });
+    };
+  });
+}
+
+export function showAssessmentAbfrageView({ onLock, homeId, patientId, searchText = "", onDone = null }) {
+  bindLockButton(onLock);
+  setCurrentView("assessment-abfrage", { homeId, patientId });
+
+  const runtimeData = getRuntimeData();
+  const home = getHomeById(runtimeData, homeId);
+  const patient = getPatientById(home, patientId);
+  const intervalMonths = runtimeData?.settings?.assessmentIntervalMonths || 3;
+
+  if (!home || !patient) {
+    showHomeDetailView({ onLock, homeId, searchText });
+    return;
+  }
+
+  const weiter = onDone || (() => showPatientDetailView({ onLock, homeId, patientId }));
+
+  function renderFrage() {
+    const existingAssessments = [...(patient.assessments || [])]
+      .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+    const hasExisting = existingAssessments.length > 0;
+
+    render(`
+      <div class="card">
+        <h2>Assessment</h2>
+        <p class="muted">Patient: ${escapeHtml(formatPatientName(patient) || "—")}</p>
+      </div>
+
+      <div class="card">
+        <h3>Assessment jetzt durchführen?</h3>
+        <div class="row">
+          <button id="assessmentJetztBtn">Jetzt durchführen</button>
+          <button id="assessmentSpaeterBtn" class="secondary">Später</button>
+        </div>
+        ${hasExisting ? `
+        <div class="row" style="margin-top:12px;">
+          <button id="assessmentZusammenfassungBtn" class="secondary">Letztes Assessment ansehen (${escapeHtml(formatDeDate(existingAssessments[0].date) || "—")})</button>
+        </div>
+        ` : ""}
+        <div class="row" style="margin-top:12px;">
+          <button id="assessmentAbbrechenBtn" class="secondary">Abbrechen</button>
+        </div>
+      </div>
+    `);
+
+    document.getElementById("assessmentJetztBtn").onclick = () => stepEbene0();
+    document.getElementById("assessmentSpaeterBtn").onclick = () => renderSpaeter();
+    document.getElementById("assessmentAbbrechenBtn").onclick = () => weiter();
+    if (hasExisting) {
+      document.getElementById("assessmentZusammenfassungBtn").onclick = () => renderZusammenfassung(existingAssessments[0]);
+    }
+  }
+
+  // Zusammenfassung des zuletzt durchgeführten Assessments - bislang war
+  // von hier aus nur ein komplett neues Assessment möglich, ein bereits
+  // vorhandenes ließ sich nur über den Umweg der Patientendetailseite
+  // einsehen.
+  function renderZusammenfassung(latest) {
+    const summary = buildAssessmentSummaryLines(patient);
+    const weicheLabel = Assessment.WEICHEN_OPTIONEN.find((w) => w.val === latest.weiche)?.label || "Basis";
+
+    render(`
+      <div class="card">
+        <h2>Letztes Assessment</h2>
+        <p class="muted">Patient: ${escapeHtml(formatPatientName(patient) || "—")} · ${escapeHtml(formatDeDate(latest.date) || "—")} · ${escapeHtml(weicheLabel)}</p>
+        <button id="backToAssessmentFrageBtn" class="secondary">Zurück</button>
+      </div>
+
+      <div class="card">
+        ${summary && summary.lines.length ? `
+          <div class="list-stack">
+            ${summary.lines.map((l) => `
+              <div>${ampelBadgeHtml(l.ampel)} <strong>${escapeHtml(l.text)}</strong>${l.deltaText ? ` <span class="muted">(${escapeHtml(l.deltaText)})</span>` : ""}</div>
+            `).join("")}
+          </div>
+        ` : `<p class="muted">Keine auswertbaren Ergebnisse für dieses Assessment.</p>`}
+      </div>
+    `);
+
+    document.getElementById("backToAssessmentFrageBtn").onclick = () => renderFrage();
+  }
+
+  // ---------- Geführter Assessment-Wizard ----------
+  const wizard = {
+    date: getComparableFromDate(new Date()),
+    ebene0: { orientierung: {}, gedaechtnis: "", kommunikation: "", kooperation: "" },
+    barthel: {},
+    schmerzTyp: "nrs",
+    nrs: null,
+    besd: {},
+    tug: { sekunden: null, hilfsmittel: "", nichtDurchfuehrbar: false },
+    weiche: "",
+    neuro: { bbs7: {}, rmi: { antworten: [], beobachtung: false }, mrc: { position: patient.assessmentMrcPosition || "", gruppen: {}, spastik: "" } },
+    ortho: { sppb: { balance: {} }, schmerzLokalisation: { zonen: [], qualitaet: [] }, romAktiv: [] },
+    schwerst: { mrc: { gruppen: {}, spastik: "" }, kontrakturen: { vorhanden: false, liste: [] }, dekubitusrisiko: "", romPassiv: [], schmerzBeiBewegung: false, spastikWiderstand: false }
+  };
+  let reviewBackStep = null;
+
+  function wizardCard(title, bodyHtml, infoKey = null) {
+    const info = infoKey ? AssessmentInfo.TEST_INFO[infoKey] : null;
+    render(`
+      <div class="card">
+        <h2>Assessment durchführen</h2>
+        <p class="muted">Patient: ${escapeHtml(formatPatientName(patient) || "—")} · ${escapeHtml(title)}</p>
+      </div>
+      <div class="card">
+        ${info ? `
+          <details class="accordion" style="margin-bottom:16px;">
+            <summary>
+              <span>ℹ️ ${escapeHtml(info.title)}</span>
+              <span class="muted">Durchführung &amp; Werte</span>
+            </summary>
+            <div class="accordion-body">
+              <h4 style="margin-top:0;">Durchführung</h4>
+              <ul style="margin:0 0 12px; padding-left:20px;">
+                ${info.durchfuehrung.map((point) => `<li>${escapeHtml(point)}</li>`).join("")}
+              </ul>
+              <h4>Werteinterpretation</h4>
+              <ul style="margin:0; padding-left:20px;">
+                ${info.interpretation.map((point) => `<li>${escapeHtml(point)}</li>`).join("")}
+              </ul>
+            </div>
+          </details>
+        ` : ""}
+        ${bodyHtml}
+      </div>
+    `);
+  }
+
+  function stepEbene0() {
+    wizardCard("Ebene 0 – Kognitiver / psychischer Status", `
+      <h3>Orientierung</h3>
+      <div class="checkbox-row checkbox-row-column">
+        <label class="check-chip" style="justify-content:flex-start;"><input type="checkbox" id="orZeitlich" ${wizard.ebene0.orientierung.zeitlich ? "checked" : ""}> <span>zeitlich orientiert</span></label>
+        <label class="check-chip" style="justify-content:flex-start;"><input type="checkbox" id="orOertlich" ${wizard.ebene0.orientierung.oertlich ? "checked" : ""}> <span>örtlich orientiert</span></label>
+        <label class="check-chip" style="justify-content:flex-start;"><input type="checkbox" id="orPerson" ${wizard.ebene0.orientierung.person ? "checked" : ""}> <span>zur Person orientiert</span></label>
+        <label class="check-chip" style="justify-content:flex-start;"><input type="checkbox" id="orSituation" ${wizard.ebene0.orientierung.situation ? "checked" : ""}> <span>zur Situation orientiert</span></label>
+      </div>
+
+      <h3 style="margin-top:16px;">Gedächtnis</h3>
+      ${renderRadioGroup("gedaechtnis", Assessment.GEDAECHTNIS_OPTIONEN, wizard.ebene0.gedaechtnis)}
+
+      <h3 style="margin-top:16px;">Kommunikation</h3>
+      ${renderRadioGroup("kommunikation", Assessment.KOMMUNIKATION_OPTIONEN, wizard.ebene0.kommunikation)}
+
+      <h3 style="margin-top:16px;">Kooperation</h3>
+      ${renderRadioGroup("kooperation", Assessment.KOOPERATION_OPTIONEN, wizard.ebene0.kooperation)}
+
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardAbbrechen" class="secondary">Abbrechen</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+    `);
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardAbbrechen").onclick = () => weiter();
+    document.getElementById("wizardNext").onclick = () => {
+      wizard.ebene0.orientierung = {
+        zeitlich: document.getElementById("orZeitlich").checked,
+        oertlich: document.getElementById("orOertlich").checked,
+        person: document.getElementById("orPerson").checked,
+        situation: document.getElementById("orSituation").checked
+      };
+      wizard.ebene0.gedaechtnis = getRadioValue("gedaechtnis");
+      wizard.ebene0.kommunikation = getRadioValue("kommunikation");
+      wizard.ebene0.kooperation = getRadioValue("kooperation");
+      wizard.schmerzTyp = Assessment.determineSchmerzTyp(wizard.ebene0);
+      stepBarthel();
+    };
+  }
+
+  function stepBarthel() {
+    wizardCard("Ebene 1 – Barthel-Index", `
+      <p class="muted">Beobachtung oder Befragung, auch fremdanamnestisch möglich.</p>
+      ${Assessment.BARTHEL_KATEGORIEN.map((kat) => `
+        <h4 style="margin-top:14px;">${escapeHtml(kat.label)}</h4>
+        ${renderPointGroup(`barthel-${kat.key}`, kat.options, wizard.barthel[kat.key])}
+      `).join("")}
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+      <div id="wizardMsg" class="error"></div>
+    `, "barthel");
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => stepEbene0();
+    document.getElementById("wizardNext").onclick = () => {
+      const msg = document.getElementById("wizardMsg");
+      const values = {};
+      for (const kat of Assessment.BARTHEL_KATEGORIEN) {
+        const raw = getRadioValue(`barthel-${kat.key}`);
+        if (raw === "") {
+          msg.textContent = `Bitte "${kat.label}" ausfüllen.`;
+          return;
+        }
+        values[kat.key] = Number(raw);
+      }
+      wizard.barthel = values;
+      stepSchmerz();
+    };
+  }
+
+  function stepSchmerz() {
+    const isBesd = wizard.schmerzTyp === "besd";
+    wizardCard(`Schmerzerfassung (${isBesd ? "BESD" : "NRS"})`, `
+      ${isBesd ? `
+        <p class="muted">Beobachtung des Patienten für ca. 2 Minuten, idealerweise bei Bewegung oder Lagerung.</p>
+        ${Assessment.BESD_KATEGORIEN.map((kat) => `
+          <h4 style="margin-top:14px;">${escapeHtml(kat.label)}</h4>
+          ${renderRadioGroup(`besd-${kat.key}`, kat.stufen.map((label, idx) => ({ val: idx, label })), wizard.besd[kat.key])}
+        `).join("")}
+      ` : `
+        <p>„Wie stark sind Ihre Schmerzen gerade, von 0 bis 10? 0 = kein Schmerz, 10 = schlimmster vorstellbarer Schmerz."</p>
+        <label for="nrsInput">Wert (0–10)</label>
+        <input id="nrsInput" type="number" min="0" max="10" step="1" value="${wizard.nrs ?? ""}">
+      `}
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+      <div id="wizardMsg" class="error"></div>
+    `, isBesd ? "besd" : "nrs");
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => stepBarthel();
+    document.getElementById("wizardNext").onclick = () => {
+      const msg = document.getElementById("wizardMsg");
+      if (isBesd) {
+        const values = {};
+        for (const kat of Assessment.BESD_KATEGORIEN) {
+          const raw = getRadioValue(`besd-${kat.key}`);
+          if (raw === "") {
+            msg.textContent = `Bitte "${kat.label}" ausfüllen.`;
+            return;
+          }
+          values[kat.key] = Number(raw);
+        }
+        wizard.besd = values;
+      } else {
+        const raw = document.getElementById("nrsInput").value.trim();
+        if (raw === "" || Number(raw) < 0 || Number(raw) > 10) {
+          msg.textContent = "Bitte einen Wert zwischen 0 und 10 eingeben.";
+          return;
+        }
+        wizard.nrs = Number(raw);
+      }
+      stepTug();
+    };
+  }
+
+  function stepTug() {
+    wizardCard("Timed Up & Go (TUG)", `
+      <p class="muted">Aufstehen → 3 Meter gehen → umdrehen → zurückgehen → hinsetzen. Stoppuhr bei vollständigem Hinsetzen anhalten.</p>
+      <label class="check-chip" style="justify-content:flex-start;"><input type="checkbox" id="tugNichtDurchfuehrbar" ${wizard.tug.nichtDurchfuehrbar ? "checked" : ""}> <span>Nicht durchführbar</span></label>
+
+      <div id="tugFieldsWrap" style="${wizard.tug.nichtDurchfuehrbar ? "display:none;" : ""}">
+        <label for="tugSekunden">Zeit (Sekunden)</label>
+        <input id="tugSekunden" type="number" min="0" step="0.1" value="${wizard.tug.sekunden ?? ""}">
+        <label for="tugHilfsmittel">Hilfsmittel</label>
+        <input id="tugHilfsmittel" type="text" placeholder="z.B. Rollator, Gehstock, keins" value="${escapeHtml(wizard.tug.hilfsmittel || "")}">
+      </div>
+
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+      <div id="wizardMsg" class="error"></div>
+    `, "tug");
+    bindCheckChipToggles(app);
+
+    document.getElementById("tugNichtDurchfuehrbar").addEventListener("change", (e) => {
+      document.getElementById("tugFieldsWrap").style.display = e.target.checked ? "none" : "block";
+    });
+
+    document.getElementById("wizardBack").onclick = () => stepSchmerz();
+    document.getElementById("wizardNext").onclick = () => {
+      const msg = document.getElementById("wizardMsg");
+      const nichtDurchfuehrbar = document.getElementById("tugNichtDurchfuehrbar").checked;
+      if (nichtDurchfuehrbar) {
+        wizard.tug = { sekunden: null, hilfsmittel: "", nichtDurchfuehrbar: true };
+        wizard.weiche = "schwerstbetroffen";
+        stepMrcSchwerst();
+        return;
+      }
+      const sekunden = document.getElementById("tugSekunden").value.trim();
+      if (sekunden === "" || Number(sekunden) < 0) {
+        msg.textContent = "Bitte eine gültige Zeit eingeben oder 'Nicht durchführbar' ankreuzen.";
+        return;
+      }
+      wizard.tug = {
+        sekunden: Number(sekunden),
+        hilfsmittel: document.getElementById("tugHilfsmittel").value.trim(),
+        nichtDurchfuehrbar: false
+      };
+      stepWeichenscreen();
+    };
+  }
+
+  function stepWeichenscreen() {
+    wizardCard("Weichenscreen", `
+      <p class="muted">Bitte den passenden Schwerpunkt für die weiteren Tests auswählen.</p>
+      <div class="list-stack">
+        ${Assessment.WEICHEN_OPTIONEN.map((opt) => `
+          <button type="button" class="secondary weichenBtn" data-val="${opt.val}" style="text-align:left;">${escapeHtml(opt.label)}</button>
+        `).join("")}
+      </div>
+      <button id="wizardBack" class="secondary" style="margin-top:16px;">Zurück</button>
+    `);
+
+    document.getElementById("wizardBack").onclick = () => stepTug();
+    document.querySelectorAll(".weichenBtn").forEach((btn) => {
+      btn.onclick = () => {
+        wizard.weiche = btn.dataset.val;
+        if (wizard.weiche === "neurologisch") stepBbs7();
+        else if (wizard.weiche === "orthopaedisch") stepSppb();
+        else stepMrcSchwerst();
+      };
+    });
+  }
+
+  // ---------- Ebene 2a: Neurologisch ----------
+  function stepBbs7() {
+    wizardCard("BBS-7 (Berg Balance Scale Kurzform)", `
+      ${Assessment.BBS7_ITEMS.map((item) => {
+        const entry = wizard.neuro.bbs7[item.key] || {};
+        return `
+          <div class="compact-card" style="margin-bottom:8px;">
+            <div style="font-weight:600; margin-bottom:6px;">${escapeHtml(item.label)}</div>
+            <label class="check-chip" style="justify-content:flex-start; margin-bottom:6px;">
+              <input type="checkbox" class="bbs7-nd" data-key="${item.key}" ${entry.nichtDurchfuehrbar ? "checked" : ""}> <span>Nicht durchführbar</span>
+            </label>
+            <div class="bbs7-score-wrap-${item.key}" style="${entry.nichtDurchfuehrbar ? "display:none;" : ""}">
+              ${renderRadioGroup(`bbs7-${item.key}`, [0, 1, 2, 3, 4].map((n) => ({ val: n, label: String(n) })), entry.score)}
+            </div>
+          </div>
+        `;
+      }).join("")}
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+      <div id="wizardMsg" class="error"></div>
+    `, "bbs7");
+    bindCheckChipToggles(app);
+    document.querySelectorAll(".bbs7-nd").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        document.querySelector(`.bbs7-score-wrap-${cb.dataset.key}`).style.display = cb.checked ? "none" : "block";
+      });
+    });
+
+    document.getElementById("wizardBack").onclick = () => stepWeichenscreen();
+    document.getElementById("wizardNext").onclick = () => {
+      const msg = document.getElementById("wizardMsg");
+      const result = {};
+      for (const item of Assessment.BBS7_ITEMS) {
+        const nd = document.querySelector(`.bbs7-nd[data-key="${item.key}"]`).checked;
+        if (nd) {
+          result[item.key] = { score: null, nichtDurchfuehrbar: true };
+          continue;
+        }
+        const raw = getRadioValue(`bbs7-${item.key}`);
+        if (raw === "") {
+          msg.textContent = `Bitte "${item.label}" bewerten oder als nicht durchführbar markieren.`;
+          return;
+        }
+        result[item.key] = { score: Number(raw), nichtDurchfuehrbar: false };
+      }
+      wizard.neuro.bbs7 = result;
+      stepRmi();
+    };
+  }
+
+  function stepRmi() {
+    wizardCard("Rivermead Mobility Index (RMI)", `
+      ${Assessment.RMI_FRAGEN.map((frage, idx) => `
+        <div class="compact-card" style="margin-bottom:8px;">
+          <div style="font-weight:600; margin-bottom:6px;">${escapeHtml(frage)}</div>
+          ${renderRadioGroup(`rmi-${idx}`, [{ val: "ja", label: "Ja" }, { val: "nein", label: "Nein" }], wizard.neuro.rmi.antworten[idx] === true ? "ja" : wizard.neuro.rmi.antworten[idx] === false ? "nein" : "")}
+        </div>
+      `).join("")}
+      <div class="compact-card" style="margin-bottom:8px;">
+        <div style="font-weight:600; margin-bottom:6px;">Beobachtungsaufgabe: Patient geht 5 Meter ohne Hilfsmittel</div>
+        ${renderRadioGroup("rmi-beobachtung", [{ val: "ja", label: "Bestanden" }, { val: "nein", label: "Nicht bestanden" }], wizard.neuro.rmi.beobachtung ? "ja" : "nein")}
+      </div>
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+      <div id="wizardMsg" class="error"></div>
+    `, "rmi");
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => stepBbs7();
+    document.getElementById("wizardNext").onclick = () => {
+      const msg = document.getElementById("wizardMsg");
+      const antworten = [];
+      for (let idx = 0; idx < Assessment.RMI_FRAGEN.length; idx++) {
+        const raw = getRadioValue(`rmi-${idx}`);
+        if (raw === "") {
+          msg.textContent = "Bitte alle Fragen beantworten.";
+          return;
+        }
+        antworten.push(raw === "ja");
+      }
+      const beob = getRadioValue("rmi-beobachtung");
+      wizard.neuro.rmi = { antworten, beobachtung: beob === "ja" };
+      stepMrcNeuro();
+    };
+  }
+
+  function stepMrcNeuro() {
+    const positionFixed = !!patient.assessmentMrcPosition;
+    wizardCard("MRC Scale (Muskelkraftprüfung)", `
+      <label>Testposition</label>
+      ${positionFixed
+        ? `<p><strong>${wizard.neuro.mrc.position === "liegen" ? "Liegen" : "Sitzen"}</strong> (für diesen Patienten fixiert seit Erstassessment)</p>`
+        : renderRadioGroup("mrcPosition", [{ val: "sitzen", label: "Sitzen" }, { val: "liegen", label: "Liegen" }], wizard.neuro.mrc.position)
+      }
+
+      ${Assessment.MRC_GRUPPEN.map((g) => `
+        <h4 style="margin-top:14px;">${escapeHtml(g.label)}</h4>
+        <div class="row">
+          <div style="flex:1;">
+            <label>Links</label>
+            ${renderPointGroup(`mrc-${g.key}-links`, [0, 1, 2, 3, 4, 5], wizard.neuro.mrc.gruppen?.[g.key]?.links)}
+          </div>
+          <div style="flex:1;">
+            <label>Rechts</label>
+            ${renderPointGroup(`mrc-${g.key}-rechts`, [0, 1, 2, 3, 4, 5], wizard.neuro.mrc.gruppen?.[g.key]?.rechts)}
+          </div>
+        </div>
+      `).join("")}
+
+      <h4 style="margin-top:14px;">Spastik</h4>
+      ${renderRadioGroup("spastikNeuro", Assessment.SPASTIK_OPTIONEN, wizard.neuro.mrc.spastik)}
+
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter zur Zusammenfassung</button>
+      </div>
+      <div id="wizardMsg" class="error"></div>
+    `, "mrc");
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => stepRmi();
+    document.getElementById("wizardNext").onclick = () => {
+      const msg = document.getElementById("wizardMsg");
+      const position = positionFixed ? patient.assessmentMrcPosition : getRadioValue("mrcPosition");
+      if (!position) {
+        msg.textContent = "Bitte eine Testposition auswählen.";
+        return;
+      }
+      const gruppen = {};
+      Assessment.MRC_GRUPPEN.forEach((g) => {
+        gruppen[g.key] = {
+          links: getRadioValue(`mrc-${g.key}-links`) || null,
+          rechts: getRadioValue(`mrc-${g.key}-rechts`) || null
+        };
+        if (gruppen[g.key].links !== null) gruppen[g.key].links = Number(gruppen[g.key].links);
+        if (gruppen[g.key].rechts !== null) gruppen[g.key].rechts = Number(gruppen[g.key].rechts);
+      });
+      wizard.neuro.mrc = { position, gruppen, spastik: getRadioValue("spastikNeuro") };
+      reviewBackStep = () => stepMrcNeuro();
+      stepReview();
+    };
+  }
+
+  // ---------- Ebene 2b: Orthopädisch ----------
+  function stepSppb() {
+    wizardCard("SPPB – Gleichgewicht", `
+      <p class="muted">Je 10 Sekunden halten.</p>
+      <label for="sppbSide">Füße nebeneinander (Sekunden gehalten)</label>
+      <input id="sppbSide" type="number" min="0" max="10" step="0.1" value="${wizard.ortho.sppb.balance.seitNebeneinanderSek ?? ""}">
+      <label for="sppbSemi">Semitandem (Sekunden gehalten)</label>
+      <input id="sppbSemi" type="number" min="0" max="10" step="0.1" value="${wizard.ortho.sppb.balance.semitandemSek ?? ""}">
+      <label for="sppbTandem">Tandem (Sekunden gehalten)</label>
+      <input id="sppbTandem" type="number" min="0" max="10" step="0.1" value="${wizard.ortho.sppb.balance.tandemSek ?? ""}">
+      <label class="check-chip" style="justify-content:flex-start; margin-top:10px;"><input type="checkbox" id="sppbBalanceNd" ${wizard.ortho.sppb.balance.nichtMoeglich ? "checked" : ""}> <span>Gleichgewichtstest nicht möglich</span></label>
+
+      <h3 style="margin-top:18px;">Gehgeschwindigkeit (4 Meter)</h3>
+      <label for="sppbGeh">Zeit (Sekunden)</label>
+      <input id="sppbGeh" type="number" min="0" step="0.1" value="${wizard.ortho.sppb.gehgeschwindigkeitSek ?? ""}">
+      <label for="sppbGehHilfsmittel">Hilfsmittel</label>
+      <input id="sppbGehHilfsmittel" type="text" value="${escapeHtml(wizard.ortho.sppb.hilfsmittel || "")}">
+
+      <h3 style="margin-top:18px;">Chair Stand Test (5x aufstehen)</h3>
+      <label for="sppbChair">Zeit (Sekunden)</label>
+      <input id="sppbChair" type="number" min="0" step="0.1" value="${wizard.ortho.sppb.chairStandSek ?? ""}">
+      <label class="check-chip" style="justify-content:flex-start; margin-top:10px;"><input type="checkbox" id="sppbChairNd" ${wizard.ortho.sppb.chairStandNichtMoeglich ? "checked" : ""}> <span>Nicht möglich</span></label>
+
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+    `, "sppb");
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => stepWeichenscreen();
+    document.getElementById("wizardNext").onclick = () => {
+      wizard.ortho.sppb = {
+        balance: {
+          seitNebeneinanderSek: document.getElementById("sppbSide").value.trim() || null,
+          semitandemSek: document.getElementById("sppbSemi").value.trim() || null,
+          tandemSek: document.getElementById("sppbTandem").value.trim() || null,
+          nichtMoeglich: document.getElementById("sppbBalanceNd").checked
+        },
+        gehgeschwindigkeitSek: document.getElementById("sppbGeh").value.trim() || null,
+        hilfsmittel: document.getElementById("sppbGehHilfsmittel").value.trim(),
+        chairStandSek: document.getElementById("sppbChair").value.trim() || null,
+        chairStandNichtMoeglich: document.getElementById("sppbChairNd").checked
+      };
+      stepSchmerzlokalisation();
+    };
+  }
+
+  function stepSchmerzlokalisation() {
+    wizardCard("Schmerzlokalisation + Qualität", `
+      <h3>Lokalisation</h3>
+      <p class="muted">Mehrfachauswahl möglich.</p>
+      ${renderCheckboxList("schmerzzone", Assessment.SCHMERZ_ZONEN, wizard.ortho.schmerzLokalisation.zonen)}
+
+      <h3 style="margin-top:16px;">Schmerzqualität</h3>
+      ${renderCheckboxList("schmerzqual", Assessment.SCHMERZ_QUALITAET_OPTIONEN, wizard.ortho.schmerzLokalisation.qualitaet)}
+
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+    `);
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => stepSppb();
+    document.getElementById("wizardNext").onclick = () => {
+      wizard.ortho.schmerzLokalisation = {
+        zonen: getCheckboxListValues("schmerzzone"),
+        qualitaet: getCheckboxListValues("schmerzqual")
+      };
+      stepRomAktivAuswahl();
+    };
+  }
+
+  function stepRomAktivAuswahl() {
+    const selected = new Set((wizard.ortho.romAktiv || []).map((r) => r.gelenk));
+    wizardCard("Aktive ROM – Gelenke auswählen", `
+      <p class="muted">Nur ausgewählte Gelenke werden getestet.</p>
+      <div class="checkbox-row checkbox-row-column">
+        ${Assessment.ROM_AKTIV_GELENKE.map((j) => `
+          <label class="check-chip" style="justify-content:flex-start; margin-bottom:6px;">
+            <input type="checkbox" class="romAktivSelect" value="${j.key}" ${selected.has(j.key) ? "checked" : ""}> <span>${escapeHtml(j.label)}</span>
+          </label>
+        `).join("")}
+      </div>
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+    `);
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => stepSchmerzlokalisation();
+    document.getElementById("wizardNext").onclick = () => {
+      const keys = Array.from(document.querySelectorAll(".romAktivSelect:checked")).map((el) => el.value);
+      if (keys.length === 0) {
+        wizard.ortho.romAktiv = [];
+        reviewBackStep = () => stepRomAktivAuswahl();
+        stepReview();
+        return;
+      }
+      stepRomAktivBewertung(keys);
+    };
+  }
+
+  function stepRomAktivBewertung(keys) {
+    const joints = Assessment.ROM_AKTIV_GELENKE.filter((j) => keys.includes(j.key));
+    const current = new Map((wizard.ortho.romAktiv || []).map((r) => [r.gelenk, r.bewertung]));
+    wizardCard("Aktive ROM – Bewertung", `
+      ${joints.map((j) => renderRomJointRow(j, current.get(j.key))).join("")}
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter zur Zusammenfassung</button>
+      </div>
+      <div id="wizardMsg" class="error"></div>
+    `, "romAktiv");
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => stepRomAktivAuswahl();
+    document.getElementById("wizardNext").onclick = () => {
+      const msg = document.getElementById("wizardMsg");
+      const results = collectRomJointResults(Assessment.ROM_AKTIV_GELENKE, keys);
+      if (results.length !== keys.length) {
+        msg.textContent = "Bitte alle ausgewählten Gelenke bewerten.";
+        return;
+      }
+      wizard.ortho.romAktiv = results;
+      reviewBackStep = () => stepRomAktivBewertung(keys);
+      stepReview();
+    };
+  }
+
+  // ---------- Ebene 2c: Schwerstbetroffene ----------
+  function stepMrcSchwerst() {
+    wizardCard("MRC Scale (im Liegen)", `
+      ${Assessment.MRC_GRUPPEN.map((g) => `
+        <h4 style="margin-top:14px;">${escapeHtml(g.label)}</h4>
+        <div class="row">
+          <div style="flex:1;">
+            <label>Links</label>
+            ${renderPointGroup(`mrcS-${g.key}-links`, [0, 1, 2, 3, 4, 5], wizard.schwerst.mrc.gruppen?.[g.key]?.links)}
+          </div>
+          <div style="flex:1;">
+            <label>Rechts</label>
+            ${renderPointGroup(`mrcS-${g.key}-rechts`, [0, 1, 2, 3, 4, 5], wizard.schwerst.mrc.gruppen?.[g.key]?.rechts)}
+          </div>
+        </div>
+      `).join("")}
+
+      <h4 style="margin-top:14px;">Spastik</h4>
+      ${renderRadioGroup("spastikSchwerst", Assessment.SPASTIK_OPTIONEN, wizard.schwerst.mrc.spastik)}
+
+      <div class="row" style="margin-top:16px;">
+        ${wizard.tug.nichtDurchfuehrbar ? `<button id="wizardBack" class="secondary">Zurück</button>` : `<button id="wizardBack" class="secondary">Zurück</button>`}
+        <button id="wizardNext">Weiter</button>
+      </div>
+    `, "mrc");
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => (wizard.tug.nichtDurchfuehrbar ? stepTug() : stepWeichenscreen());
+    document.getElementById("wizardNext").onclick = () => {
+      const gruppen = {};
+      Assessment.MRC_GRUPPEN.forEach((g) => {
+        gruppen[g.key] = {
+          links: getRadioValue(`mrcS-${g.key}-links`) || null,
+          rechts: getRadioValue(`mrcS-${g.key}-rechts`) || null
+        };
+        if (gruppen[g.key].links !== null) gruppen[g.key].links = Number(gruppen[g.key].links);
+        if (gruppen[g.key].rechts !== null) gruppen[g.key].rechts = Number(gruppen[g.key].rechts);
+      });
+      wizard.schwerst.mrc = { gruppen, spastik: getRadioValue("spastikSchwerst") };
+      stepKontrakturenDekubitus();
+    };
+  }
+
+  function stepKontrakturenDekubitus() {
+    wizardCard("Kontrakturen & Dekubitusrisiko", `
+      <label class="check-chip" style="justify-content:flex-start;"><input type="checkbox" id="kontrakturenVorhanden" ${wizard.schwerst.kontrakturen.vorhanden ? "checked" : ""}> <span>Kontrakturen vorhanden</span></label>
+      <div id="kontrakturenListWrap" style="${wizard.schwerst.kontrakturen.vorhanden ? "" : "display:none;"} margin-top:10px;">
+        ${renderCheckboxList("kontraktur", Assessment.KONTRAKTUR_GELENKE.map((k) => k.label), (wizard.schwerst.kontrakturen.liste || []).map((key) => Assessment.KONTRAKTUR_GELENKE.find((k) => k.key === key)?.label).filter(Boolean))}
+      </div>
+
+      <h3 style="margin-top:18px;">Dekubitusrisiko laut Pflegedokumentation</h3>
+      ${renderRadioGroup("dekubitusrisiko", [{ val: "ja", label: "Ja" }, { val: "nein", label: "Nein" }], wizard.schwerst.dekubitusrisiko)}
+
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+      <div id="wizardMsg" class="error"></div>
+    `, "kontrakturenDekubitus");
+    bindCheckChipToggles(app);
+
+    document.getElementById("kontrakturenVorhanden").addEventListener("change", (e) => {
+      document.getElementById("kontrakturenListWrap").style.display = e.target.checked ? "block" : "none";
+    });
+
+    document.getElementById("wizardBack").onclick = () => stepMrcSchwerst();
+    document.getElementById("wizardNext").onclick = () => {
+      const msg = document.getElementById("wizardMsg");
+      const vorhanden = document.getElementById("kontrakturenVorhanden").checked;
+      const selectedLabels = vorhanden ? getCheckboxListValues("kontraktur") : [];
+      const liste = selectedLabels.map((label) => Assessment.KONTRAKTUR_GELENKE.find((k) => k.label === label)?.key).filter(Boolean);
+      const dekubitusrisiko = getRadioValue("dekubitusrisiko");
+      if (!dekubitusrisiko) {
+        msg.textContent = "Bitte Dekubitusrisiko angeben.";
+        return;
+      }
+      wizard.schwerst.kontrakturen = { vorhanden, liste };
+      wizard.schwerst.dekubitusrisiko = dekubitusrisiko;
+      stepRomPassivAuswahl();
+    };
+  }
+
+  function stepRomPassivAuswahl() {
+    const selected = new Set((wizard.schwerst.romPassiv || []).map((r) => r.gelenk));
+    wizardCard("Passive ROM – Gelenke auswählen", `
+      <p class="muted">Therapeut bewegt die Gelenke passiv. Nur ausgewählte Gelenke werden getestet.</p>
+      <div class="checkbox-row checkbox-row-column">
+        ${Assessment.ROM_PASSIV_GELENKE.map((j) => `
+          <label class="check-chip" style="justify-content:flex-start; margin-bottom:6px;">
+            <input type="checkbox" class="romPassivSelect" value="${j.key}" ${selected.has(j.key) ? "checked" : ""}> <span>${escapeHtml(j.label)}</span>
+          </label>
+        `).join("")}
+      </div>
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter</button>
+      </div>
+    `);
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => stepKontrakturenDekubitus();
+    document.getElementById("wizardNext").onclick = () => {
+      const keys = Array.from(document.querySelectorAll(".romPassivSelect:checked")).map((el) => el.value);
+      stepRomPassivBewertung(keys);
+    };
+  }
+
+  function stepRomPassivBewertung(keys) {
+    const joints = Assessment.ROM_PASSIV_GELENKE.filter((j) => keys.includes(j.key));
+    const current = new Map((wizard.schwerst.romPassiv || []).map((r) => [r.gelenk, r.bewertung]));
+    wizardCard("Passive ROM – Bewertung", `
+      ${joints.map((j) => renderRomJointRow(j, current.get(j.key))).join("")}
+
+      <h4 style="margin-top:14px;">Zusätzliche Angaben</h4>
+      <label class="check-chip" style="justify-content:flex-start; margin-bottom:6px;"><input type="checkbox" id="schmerzBeiBewegung" ${wizard.schwerst.schmerzBeiBewegung ? "checked" : ""}> <span>Schmerz bei Bewegung</span></label>
+      <label class="check-chip" style="justify-content:flex-start;"><input type="checkbox" id="spastikWiderstand" ${wizard.schwerst.spastikWiderstand ? "checked" : ""}> <span>Spastik / Widerstand spürbar</span></label>
+
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="wizardNext">Weiter zur Zusammenfassung</button>
+      </div>
+      <div id="wizardMsg" class="error"></div>
+    `, "romPassiv");
+    bindCheckChipToggles(app);
+
+    document.getElementById("wizardBack").onclick = () => stepRomPassivAuswahl();
+    document.getElementById("wizardNext").onclick = () => {
+      const msg = document.getElementById("wizardMsg");
+      const results = collectRomJointResults(Assessment.ROM_PASSIV_GELENKE, keys);
+      if (results.length !== keys.length) {
+        msg.textContent = "Bitte alle ausgewählten Gelenke bewerten.";
+        return;
+      }
+      wizard.schwerst.romPassiv = results;
+      wizard.schwerst.schmerzBeiBewegung = document.getElementById("schmerzBeiBewegung").checked;
+      wizard.schwerst.spastikWiderstand = document.getElementById("spastikWiderstand").checked;
+      reviewBackStep = () => stepRomPassivBewertung(keys);
+      stepReview();
+    };
+  }
+
+  // ---------- Zusammenfassung & Speichern ----------
+  function stepReview() {
+    const barthelTotal = Assessment.computeBarthelTotal(wizard.barthel);
+    const schmerzLine = wizard.schmerzTyp === "besd"
+      ? `BESD: ${Assessment.computeBesdTotal(wizard.besd)}/${Assessment.BESD_MAX} – ${Assessment.classifyBesd(Assessment.computeBesdTotal(wizard.besd))}`
+      : `NRS: ${wizard.nrs}/10 – ${Assessment.classifyNrs(wizard.nrs)}`;
+
+    let ebeneSummary = "";
+    if (wizard.weiche === "neurologisch") {
+      const bbs = Assessment.computeBbs7(wizard.neuro.bbs7);
+      const rmiTotal = Assessment.computeRmiTotal(wizard.neuro.rmi.antworten, wizard.neuro.rmi.beobachtung);
+      const mrc = Assessment.computeMrcTotal(wizard.neuro.mrc.gruppen);
+      ebeneSummary = `
+        <p><strong>BBS-7:</strong> ${bbs.total}/${bbs.maxPossible} – ${escapeHtml(Assessment.classifyBbs7(bbs.total))}${bbs.notDurchfuehrbar ? ` (${bbs.notDurchfuehrbar} Item(s) nicht durchführbar)` : ""}</p>
+        <p><strong>RMI:</strong> ${rmiTotal}/${Assessment.RMI_MAX} – ${escapeHtml(Assessment.classifyRmi(rmiTotal))}</p>
+        <p><strong>MRC gesamt:</strong> ${mrc.total}/${mrc.max} (${mrc.count} bewertete Werte)</p>
+      `;
+    } else if (wizard.weiche === "orthopaedisch") {
+      const sppb = Assessment.computeSppbTotal(wizard.ortho.sppb);
+      ebeneSummary = `
+        <p><strong>SPPB:</strong> ${sppb.total}/${Assessment.SPPB_MAX} – ${escapeHtml(Assessment.classifySppb(sppb.total))}</p>
+        <p><strong>Schmerzzonen:</strong> ${escapeHtml(wizard.ortho.schmerzLokalisation.zonen.join(", ") || "—")}</p>
+        <p><strong>ROM aktiv:</strong> ${wizard.ortho.romAktiv.length} Gelenk(e) getestet</p>
+      `;
+    } else if (wizard.weiche === "schwerstbetroffen") {
+      const mrc = Assessment.computeMrcTotal(wizard.schwerst.mrc.gruppen);
+      ebeneSummary = `
+        <p><strong>MRC gesamt (liegend):</strong> ${mrc.total}/${mrc.max}</p>
+        <p><strong>Kontrakturen:</strong> ${wizard.schwerst.kontrakturen.vorhanden ? `${wizard.schwerst.kontrakturen.liste.length} Gelenk(e)` : "Keine"}</p>
+        <p><strong>Dekubitusrisiko:</strong> ${wizard.schwerst.dekubitusrisiko === "ja" ? "Ja" : "Nein"}</p>
+        <p><strong>ROM passiv:</strong> ${wizard.schwerst.romPassiv.length} Gelenk(e) getestet</p>
+      `;
+    }
+
+    wizardCard("Zusammenfassung", `
+      <p><strong>Barthel-Index:</strong> ${barthelTotal}/${Assessment.BARTHEL_MAX} – ${escapeHtml(Assessment.classifyBarthel(barthelTotal))}</p>
+      <p><strong>Schmerz:</strong> ${escapeHtml(schmerzLine)}</p>
+      <p><strong>TUG:</strong> ${wizard.tug.nichtDurchfuehrbar ? "Nicht durchführbar" : `${wizard.tug.sekunden}s – ${escapeHtml(Assessment.classifyTug(wizard.tug.sekunden))}`}</p>
+      ${ebeneSummary}
+
+      <div class="row" style="margin-top:16px;">
+        <button id="wizardBack" class="secondary">Zurück</button>
+        <button id="assessmentSpeichernBtn">Assessment speichern</button>
+      </div>
+      <div id="wizardMsg" class="error"></div>
+    `);
+
+    document.getElementById("wizardBack").onclick = () => (reviewBackStep ? reviewBackStep() : weiter());
+    document.getElementById("assessmentSpeichernBtn").onclick = async () => {
+      const msg = document.getElementById("wizardMsg");
+      try {
+        saveAssessmentResult(homeId, patientId, wizard, intervalMonths);
+        await queuePersistRuntimeData();
+        weiter();
+      } catch (err) {
+        console.error(err);
+        msg.textContent = err?.message || "Assessment konnte nicht gespeichert werden.";
+      }
+    };
+  }
+
+  function renderSpaeter() {
+    render(`
+      <div class="card">
+        <h2>Assessment später durchführen</h2>
+        <p class="muted">Wann möchtest du das Assessment durchführen?</p>
+      </div>
+
+      <div class="card">
+        <label for="assessmentSpaeterDatum">Datum</label>
+        <input id="assessmentSpaeterDatum" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
+        <p class="muted">Die Erinnerung erscheint erst ab diesem Datum in der App – keine wöchentliche Wiederholung vorher.</p>
+        <div class="row" style="margin-top:12px;">
+          <button id="assessmentSpaeterZurueckBtn" class="secondary">Zurück</button>
+          <button id="assessmentSpaeterSpeichernBtn">Speichern</button>
+        </div>
+        <div id="assessmentSpaeterMsg" class="error"></div>
+      </div>
+    `);
+
+    bindDateAutoFormat(document.getElementById("assessmentSpaeterDatum"));
+
+    document.getElementById("assessmentSpaeterZurueckBtn").onclick = () => renderFrage();
+    document.getElementById("assessmentSpaeterSpeichernBtn").onclick = async () => {
+      const msg = document.getElementById("assessmentSpaeterMsg");
+      const value = document.getElementById("assessmentSpaeterDatum").value.trim();
+      const parsed = parseDeDate(value);
+      if (!parsed) {
+        msg.textContent = "Bitte ein gültiges Datum eingeben.";
+        return;
+      }
+
+      try {
+        scheduleAssessment(homeId, patientId, parsed);
+        await queuePersistRuntimeData();
+        weiter();
+      } catch (err) {
+        console.error(err);
+        msg.textContent = err?.message || "Termin konnte nicht gespeichert werden.";
+      }
+    };
+  }
+
+  renderFrage();
 }
 
 export function showPatientDetailView({ onLock, homeId, patientId }) {
@@ -2930,7 +5150,7 @@ export function showPatientDetailView({ onLock, homeId, patientId }) {
 
   render(`
     <div class="card">
-      <h2>${escapeHtml(`${patient.firstName} ${patient.lastName}`.trim() || "Patient")}</h2>
+      <h2>${escapeHtml(formatPatientName(patient) || "Patient")}</h2>
       <p class="muted">Heim: ${escapeHtml(home.name || "—")}</p>
       <button id="backHomeDetailBtn" class="secondary">Zurück zum Heim</button>
     </div>
@@ -3006,12 +5226,25 @@ export function showPatientDetailView({ onLock, homeId, patientId }) {
 
     <details class="accordion">
       <summary>
+        <span>Assessments</span>
+        <span class="muted">${(patient.assessments || []).length}</span>
+      </summary>
+      <div class="accordion-body">
+        <p class="muted">${patient.nextAssessmentDueAt ? `Nächstes Assessment fällig ab: ${escapeHtml(formatDeDate(patient.nextAssessmentDueAt))}` : "Kein Folge-Assessment geplant."}</p>
+        ${patient.assessmentMrcPosition ? `<p class="muted">MRC-Testposition (fixiert): ${patient.assessmentMrcPosition === "liegen" ? "Liegen" : "Sitzen"}</p>` : ""}
+        <p class="muted">Assessments werden über den Dashboard-Button „Assessment" gestartet.</p>
+        ${renderAssessmentHistorySection(patient)}
+      </div>
+    </details>
+
+    <details class="accordion">
+      <summary>
         <span>Stammdaten</span>
         <span class="muted">anzeigen</span>
       </summary>
       <div class="accordion-body">
-        <p><strong>Vorname:</strong> ${escapeHtml(patient.firstName || "—")}</p>
         <p><strong>Nachname:</strong> ${escapeHtml(patient.lastName || "—")}</p>
+        <p><strong>Vorname:</strong> ${escapeHtml(patient.firstName || "—")}</p>
         <p><strong>Geburtsdatum:</strong> ${escapeHtml(patient.birthDate || "—")}</p>
         <p><strong>Befreit:</strong> ${patient.befreit ? "Ja" : "Nein"}</p>
         <p><strong>Hausbesuch:</strong> ${patient.hb ? "Ja" : "Nein"}</p>
@@ -3030,7 +5263,7 @@ export function showPatientDetailView({ onLock, homeId, patientId }) {
   };
 
   document.getElementById("deletePatientBtn").onclick = async () => {
-    const patientLabel = `${patient.firstName} ${patient.lastName}`.trim() || "Patient";
+    const patientLabel = formatPatientName(patient) || "Patient";
     const ok = confirm(`${patientLabel} wirklich löschen? Alle Rezepte und Dokumentationen dieses Patienten werden ebenfalls gelöscht.`);
     if (!ok) return;
 
@@ -3067,13 +5300,309 @@ export function showPatientDetailView({ onLock, homeId, patientId }) {
   });
 }
 
-export function showCreateRezeptView({ onLock, homeId, patientId }) {
+function renderOptimierungErgebnisCard(ergebnis, { primary = false } = {}) {
+  const heilmittelLabel = VERGUETUNG[ergebnis.empfehlung]?.label || ergebnis.empfehlung;
+  return `
+    <div class="compact-card selectable-card" style="${primary ? 'border-color:var(--primary);' : ''}">
+      <p style="margin:0;"><strong>${escapeHtml(heilmittelLabel)}</strong></p>
+      <div class="compact-meta" style="margin-top:6px;">
+        Diagnose: ${escapeHtml(ergebnis.diagnose || "—")}<br>
+        ICD-10: ${escapeHtml(ergebnis.icd)} · Gruppe: ${escapeHtml(ergebnis.gruppeLabel || ergebnis.gruppe)}<br>
+        Max. je VO: ${ergebnis.maxProVO}x · Orient. Menge: ${ergebnis.orientierendeMenge} Einheiten
+        ${ergebnis.lhb ? `<br><span class="pill-green">LHB möglich</span>` : ""}
+        ${ergebnis.bvb ? `<br><span class="pill-orange">Besonderer Verordnungsbedarf: ${escapeHtml(ergebnis.bvb)}</span>` : ""}
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button class="optimierungUebernehmenBtn" data-icd="${escapeHtml(ergebnis.icd)}" data-empfehlung="${escapeHtml(ergebnis.empfehlung)}" data-gruppe="${escapeHtml(ergebnis.gruppe)}" data-gruppelabel="${escapeHtml(ergebnis.gruppeLabel || '')}" data-maxprovo="${ergebnis.maxProVO}" data-orientierendemenge="${ergebnis.orientierendeMenge}" data-lhb="${ergebnis.lhb ? '1' : '0'}" data-eingabe="${escapeHtml(ergebnis.eingabe || ergebnis.icd)}">Übernehmen</button>
+        <button class="optimierungPdfBtn secondary" data-icd="${escapeHtml(ergebnis.icd)}" data-empfehlung="${escapeHtml(ergebnis.empfehlung)}" data-gruppe="${escapeHtml(ergebnis.gruppe)}" data-gruppelabel="${escapeHtml(ergebnis.gruppeLabel || '')}" data-maxprovo="${ergebnis.maxProVO}" data-orientierendemenge="${ergebnis.orientierendeMenge}" data-diagnose="${escapeHtml(ergebnis.diagnose || '')}" data-lhb="${ergebnis.lhb ? '1' : '0'}" data-bvb="${escapeHtml(ergebnis.bvb || '')}">PDF für Arzt-Fax</button>
+      </div>
+    </div>
+  `;
+}
+
+export function showRezeptoptimierungView({ onLock, homeId, patientId }) {
+  bindLockButton(onLock);
+  setCurrentView("rezept-optimierung", { homeId, patientId });
+
+  const runtimeData = getRuntimeData();
+  const home = getHomeById(runtimeData, homeId);
+  const patient = getPatientById(home, patientId);
+
+  if (!home || !patient) {
+    showHomeDetailView({ onLock, homeId });
+    return;
+  }
+
+  const zertifikate = runtimeData?.settings?.zertifikate || { kgzns: false, mt: false, mld: false };
+  const gespeicherteZuordnungen = patient.diagnoseZuordnung || [];
+  let diagnoseListe = [];
+
+  function renderZertifikateHinweis() {
+    const aktiv = [
+      zertifikate.kgzns ? "KG-ZNS" : null,
+      zertifikate.mt ? "MT" : null,
+      zertifikate.mld ? "MLD" : null
+    ].filter(Boolean);
+    return aktiv.length === 0
+      ? `<p class="muted">Keine Zusatz-Zertifikate hinterlegt – Vorschläge basieren nur auf KG. In den Einstellungen ergänzbar.</p>`
+      : `<p class="muted">Aktive Zertifikate: ${aktiv.map((z) => `<span class="pill">${escapeHtml(z)}</span>`).join(" ")}</p>`;
+  }
+
+  function renderDiagnoseChips() {
+    if (diagnoseListe.length === 0) {
+      return `<p class="muted" style="margin:0;">Noch keine Diagnosen eingegeben.</p>`;
+    }
+    return diagnoseListe.map((eingabe, idx) => `
+      <span class="pill-blue" style="display:inline-flex; align-items:center; gap:6px;">
+        ${escapeHtml(eingabe)}
+        <button type="button" class="removeDiagnoseBtn" data-idx="${idx}" style="width:auto; margin:0; padding:0 4px; background:none; color:inherit; font-weight:700;">×</button>
+      </span>
+    `).join(" ");
+  }
+
+  function refreshDiagnoseChips() {
+    const container = document.getElementById("diagnoseChipsContainer");
+    if (!container) return;
+    container.innerHTML = renderDiagnoseChips();
+    container.querySelectorAll(".removeDiagnoseBtn").forEach((btn) => {
+      btn.onclick = () => {
+        diagnoseListe.splice(Number(btn.dataset.idx), 1);
+        refreshDiagnoseChips();
+      };
+    });
+  }
+
+  function buildOptimierungLetterHtml(ergebnis) {
+    const settings = runtimeData?.settings || {};
+    const patientName = `${patient.lastName || ""}, ${patient.firstName || ""}`.replace(/^,\s*/, "").trim() || "—";
+    const heilmittelLabel = EMPFEHLUNG_ZU_ITEM_TYPE[ergebnis.empfehlung] || ergebnis.empfehlung;
+    const leitsymptomatik = getDefaultLeitsymptomatik(ergebnis.gruppe);
+    const empfohleneMenge = ergebnis.lhb ? (ergebnis.orientierendeMenge || ergebnis.maxProVO) : ergebnis.maxProVO;
+
+    return `
+      <h1>Verordnungsvorschlag</h1>
+      <p class="muted">Erstellt am ${escapeHtml(formatDeDate(new Date()))} · ${escapeHtml(settings.therapistName || "")}</p>
+
+      <p>Sehr geehrte Damen und Herren,</p>
+      <p>
+        wir bitten Sie freundlich, für den/die Patient/in <strong>${escapeHtml(patientName)}</strong>${patient.birthDate ? ` (geb. ${escapeHtml(patient.birthDate)})` : ""}
+        eine physiotherapeutische Verordnung gemäß Heilmittelkatalog auszustellen. Nachfolgend unser Vorschlag auf Basis der vorliegenden Diagnose:
+      </p>
+
+      ${ergebnis.lhb ? `<p><strong>Hinweis:</strong> Die genannte Diagnose berechtigt zum langfristigen Heilmittelbedarf (§ 32 Abs. 1a SGB V) – kein Regress für den Arzt.</p>` : ""}
+
+      <table>
+        <tr><th>Patient/in</th><td>${escapeHtml(patientName)}</td></tr>
+        <tr><th>Geburtsdatum</th><td>${escapeHtml(patient.birthDate || "—")}</td></tr>
+        <tr><th>Heim / Einrichtung</th><td>${escapeHtml(home.name || "—")}</td></tr>
+        <tr><th>Heilmittel</th><td>${escapeHtml(heilmittelLabel)}</td></tr>
+        <tr><th>Diagnosegruppe</th><td>${escapeHtml(ergebnis.gruppe)} – ${escapeHtml(ergebnis.gruppeLabel || "")}</td></tr>
+        <tr><th>ICD-10-Code</th><td>${escapeHtml(ergebnis.icd)}${ergebnis.diagnose ? ` (${escapeHtml(ergebnis.diagnose)})` : ""}</td></tr>
+        <tr><th>Leitsymptomatik</th><td>${escapeHtml(leitsymptomatik)}</td></tr>
+        <tr><th>Behandlungseinheiten</th><td>${empfohleneMenge}x</td></tr>
+        <tr><th>Hausbesuch</th><td>Ja</td></tr>
+        <tr><th>LHB</th><td>${ergebnis.lhb ? "Ja" : "Nein"}</td></tr>
+      </table>
+
+      ${ergebnis.bvb ? `<p class="muted">Besonderer Verordnungsbedarf: ${escapeHtml(ergebnis.bvb)}</p>` : ""}
+
+      <p style="margin-top:20px;">Wir danken Ihnen herzlich für Ihre Unterstützung und stehen bei Rückfragen jederzeit gerne zur Verfügung.</p>
+      <p>Mit freundlichen Grüßen<br>${escapeHtml(settings.therapistName || "")}${settings.therapistFax ? `<br>Fax: ${escapeHtml(settings.therapistFax)}` : ""}</p>
+    `;
+  }
+
+  function bindErgebnisActions(container) {
+    container.querySelectorAll(".optimierungUebernehmenBtn").forEach((btn) => {
+      btn.onclick = async () => {
+        const icd10 = btn.dataset.icd;
+        const empfehlung = btn.dataset.empfehlung;
+        const gruppe = btn.dataset.gruppe;
+        const gruppeLabel = btn.dataset.gruppelabel;
+        const maxProVO = btn.dataset.maxprovo;
+        const orientierendeMenge = btn.dataset.orientierendemenge;
+        const lhb = btn.dataset.lhb === "1";
+        const eingabe = btn.dataset.eingabe;
+        // Bei langfristigem Heilmittelbedarf (LHB) darf die verordnete Menge
+        // über dem Regelfall-Höchstwert je VO liegen (orientierende Menge
+        // aus dem Heilmittelkatalog statt pauschal maxProVO).
+        const empfohleneMenge = lhb ? (orientierendeMenge || maxProVO) : maxProVO;
+
+        try {
+          saveDiagnoseZuordnung(homeId, patientId, {
+            input: eingabe,
+            icd10,
+            gruppe,
+            gruppeLabel,
+            empfehlung
+          });
+          await queuePersistRuntimeData();
+
+          showCreateRezeptView({
+            onLock,
+            homeId,
+            patientId,
+            prefill: {
+              icd10,
+              leitsymptomatik: getDefaultLeitsymptomatik(gruppe),
+              itemType: EMPFEHLUNG_ZU_ITEM_TYPE[empfehlung] || "KG",
+              count: empfohleneMenge || ""
+            }
+          });
+        } catch (err) {
+          console.error(err);
+          alert(err?.message || "Diagnose-Zuordnung konnte nicht gespeichert werden.");
+        }
+      };
+    });
+
+    container.querySelectorAll(".optimierungPdfBtn").forEach((btn) => {
+      btn.onclick = () => {
+        const ergebnis = {
+          icd: btn.dataset.icd,
+          empfehlung: btn.dataset.empfehlung,
+          gruppe: btn.dataset.gruppe,
+          gruppeLabel: btn.dataset.gruppelabel,
+          maxProVO: btn.dataset.maxprovo,
+          orientierendeMenge: btn.dataset.orientierendemenge,
+          diagnose: btn.dataset.diagnose,
+          lhb: btn.dataset.lhb === "1",
+          bvb: btn.dataset.bvb || null
+        };
+        const bodyHtml = buildOptimierungLetterHtml(ergebnis);
+        openHtmlDocument("Verordnungsvorschlag", bodyHtml, { autoPrint: false });
+      };
+    });
+  }
+
+  function runOptimierung() {
+    const ergebnisContainer = document.getElementById("optimierungErgebnisContainer");
+    if (!ergebnisContainer) return;
+
+    if (diagnoseListe.length === 0) {
+      ergebnisContainer.innerHTML = `<p class="error">Bitte mindestens eine Diagnose eingeben.</p>`;
+      return;
+    }
+
+    const ergebnisse = optimiereVerordnung(diagnoseListe, zertifikate);
+    const bekannte = ergebnisse.filter((e) => !e.unbekannt);
+    const unbekannte = ergebnisse.filter((e) => e.unbekannt);
+
+    if (bekannte.length === 0) {
+      ergebnisContainer.innerHTML = `<p class="error">Keine der eingegebenen Diagnosen konnte zugeordnet werden. Bitte ICD-10-Code direkt eingeben oder Formulierung anpassen.</p>`;
+      return;
+    }
+
+    const beste = bekannte[0];
+    const alternativen = bekannte.slice(1);
+
+    ergebnisContainer.innerHTML = `
+      <h3 style="margin-top:20px;">✓ Beste Verordnung</h3>
+      ${renderOptimierungErgebnisCard(beste, { primary: true })}
+      ${alternativen.length > 0 ? `
+        <h3 style="margin-top:20px;">Weitere Optionen</h3>
+        <div class="list-stack">${alternativen.map((e) => renderOptimierungErgebnisCard(e)).join("")}</div>
+      ` : ""}
+      ${unbekannte.length > 0 ? `
+        <p class="error" style="margin-top:16px;">Nicht erkannt: ${unbekannte.map((e) => escapeHtml(e.eingabe || e.icd)).join(", ")} – bitte ICD-10-Code direkt eingeben oder manuell prüfen.</p>
+      ` : ""}
+    `;
+
+    bindErgebnisActions(ergebnisContainer);
+  }
+
+  render(`
+    <div class="card">
+      <h2>Rezeptoptimierung</h2>
+      <p class="muted">Patient: ${escapeHtml(formatPatientName(patient) || "—")}</p>
+      <button id="backPatientBtn" class="secondary">Zurück zum Patienten</button>
+    </div>
+
+    <div class="card">
+      <h3>Zertifikate</h3>
+      ${renderZertifikateHinweis()}
+    </div>
+
+    ${gespeicherteZuordnungen.length > 0 ? `
+      <div class="card">
+        <h3>Zuletzt verwendete Diagnosen</h3>
+        <div class="list-stack">
+          ${gespeicherteZuordnungen.slice(0, 5).map((item) => `
+            <div class="compact-card" style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+              <div style="min-width:0;">
+                <div style="font-weight:600;">${escapeHtml(item.input || item.icd10)}</div>
+                <div class="compact-meta">${escapeHtml(item.icd10)} · ${escapeHtml(item.gruppeLabel || item.gruppe)}</div>
+              </div>
+              <button type="button" class="reuseZuordnungBtn secondary" style="width:auto;" data-icd="${escapeHtml(item.icd10)}">Erneut verwenden</button>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    ` : ""}
+
+    <div class="card">
+      <h3>Diagnose(n) eingeben</h3>
+      <p class="muted">Freitext (z.B. "Schlaganfall", "Rückenschmerzen") oder ICD-10-Code.</p>
+      <div class="row">
+        <input id="diagnoseInput" type="text" placeholder="z.B. Rückenschmerzen oder M54.5">
+        <button id="addDiagnoseBtn" type="button" style="flex:0 0 auto; width:auto;">Hinzufügen</button>
+      </div>
+      <div id="diagnoseChipsContainer" style="margin-top:12px; display:flex; flex-wrap:wrap; gap:8px;">
+        ${renderDiagnoseChips()}
+      </div>
+      <button id="findOptimumBtn" style="margin-top:16px;">Optimale Verordnung finden</button>
+      <div id="optimierungErgebnisContainer"></div>
+    </div>
+  `);
+
+  document.getElementById("backPatientBtn").onclick = () => {
+    showPatientDetailView({ onLock, homeId, patientId });
+  };
+
+  document.querySelectorAll(".reuseZuordnungBtn").forEach((btn) => {
+    btn.onclick = () => {
+      const icd = btn.dataset.icd;
+      if (icd && !diagnoseListe.includes(icd)) {
+        diagnoseListe.push(icd);
+        refreshDiagnoseChips();
+      }
+    };
+  });
+
+  function addDiagnoseFromInput() {
+    const input = document.getElementById("diagnoseInput");
+    const raw = input.value.trim();
+    if (!raw) return;
+    const resolved = resolveDiagnoseInput(raw);
+    const value = resolved?.quelle === "icd10" ? formatICD(raw) : raw;
+    if (!diagnoseListe.includes(value)) {
+      diagnoseListe.push(value);
+      refreshDiagnoseChips();
+    }
+    input.value = "";
+    input.focus();
+  }
+
+  document.getElementById("addDiagnoseBtn").onclick = addDiagnoseFromInput;
+  document.getElementById("diagnoseInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addDiagnoseFromInput();
+    }
+  });
+
+  document.getElementById("findOptimumBtn").onclick = runOptimierung;
+}
+
+export function showCreateRezeptView({ onLock, homeId, patientId, prefill = null }) {
   bindLockButton(onLock);
   setCurrentView("rezept-create", { homeId, patientId });
+
+  const prefillItems = prefill?.itemType ? [{ type: prefill.itemType, count: prefill.count || "" }] : [];
 
   render(`
     <div class="card">
       <h2>Neues Rezept</h2>
+      ${prefill ? `<p class="muted">Vorausgefüllt aus der Rezeptoptimierung. Bitte prüfen und ggf. anpassen.</p>` : ""}
       <button id="backPatientBtn" class="secondary">Zurück zum Patienten</button>
     </div>
 
@@ -3084,16 +5613,39 @@ export function showCreateRezeptView({ onLock, homeId, patientId }) {
         ${getKnownDoctorNames(getRuntimeData()).map((name) => `<option value="${escapeHtml(name)}"></option>`).join("")}
       </datalist>
 
+      ${renderArztAdresseFields("")}
+
       <label for="ausstell">Ausstellungsdatum</label>
       <input id="ausstell" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
 
+      <label for="icd10">ICD-10 Code</label>
+      <input id="icd10" type="text" placeholder="z.B. M54.5" value="${escapeHtml(prefill?.icd10 || "")}">
+
+      <label for="icd10b">2. ICD-10 Code (optional)</label>
+      <input id="icd10b" type="text" placeholder="z.B. M54.5" value="${escapeHtml(prefill?.icd10b || "")}">
+
+      ${renderLeitsymptomatikField(prefill?.leitsymptomatik || "")}
+
+      <h3 style="margin-top:20px;">Leistungen</h3>
+      ${renderRezeptItemsEditor(prefillItems)}
+
+      <h3 style="margin-top:20px;">Rezeptprüfung</h3>
       <div class="checkbox-row">
         <label class="check-chip"><input id="bg" type="checkbox"> <span>BG</span></label>
         <label class="check-chip"><input id="dt" type="checkbox"> <span>Doppeltermin</span></label>
+        <label class="check-chip"><input id="dringend" type="checkbox"> <span>Dringender Bedarf</span></label>
       </div>
 
-      <h3 style="margin-top:20px;">Leistungen</h3>
-      ${renderRezeptItemsEditor([])}
+      <label for="hausbesuch">Hausbesuch</label>
+      ${renderJaNeinSelect("hausbesuch", "")}
+
+      <label for="arztStempel">Arzt-Stempel vorhanden</label>
+      ${renderJaNeinSelect("arztStempel", "")}
+
+      <label for="arztUnterschrift">Arzt-Unterschrift vorhanden</label>
+      ${renderJaNeinSelect("arztUnterschrift", "")}
+
+      <div id="rezeptPruefungPanel" style="margin-top:16px;"></div>
 
       <button id="saveRezeptBtn">Rezept speichern</button>
       <div id="rezeptMsg"></div>
@@ -3105,31 +5657,37 @@ export function showCreateRezeptView({ onLock, homeId, patientId }) {
   };
 
   bindDateAutoFormat(document.getElementById("ausstell"));
-  bindRezeptItemsEditor([]);
+  bindIcdAutoFormat(document.getElementById("icd10"));
+  bindIcdAutoFormat(document.getElementById("icd10b"));
+  bindRezeptItemsEditor(prefillItems);
   bindCheckChipToggles(app);
   bindQuickDocSelectionStyles(app);
   bindSelectableCardChecks(app);
+  bindLeitsymptomatikField();
+  bindRezeptPruefungLive("rezeptPruefungPanel");
+
+  const arztInput = document.getElementById("arzt");
+  const arztRegistry = getArztRegistry(getRuntimeData());
+  bindArztAdresseAutofill(arztInput, arztRegistry);
 
   document.getElementById("saveRezeptBtn").onclick = async () => {
     const msg = document.getElementById("rezeptMsg");
     msg.className = "error";
     msg.textContent = "";
 
-    const items = collectRezeptItemsFromForm();
+    const payload = collectRezeptFormPayload();
 
-    if (items.length === 0) {
+    if (payload.items.length === 0) {
       msg.textContent = "Bitte mindestens eine Leistung angeben.";
       return;
     }
 
     try {
-      createRezept(homeId, patientId, {
-        arzt: document.getElementById("arzt").value.trim(),
-        ausstell: document.getElementById("ausstell").value.trim(),
-        bg: document.getElementById("bg").checked,
-        dt: document.getElementById("dt").checked,
-        items
-      });
+      createRezept(homeId, patientId, payload);
+      const arztAdresse = collectArztAdresseFromForm();
+      if (payload.arzt && arztAdresse) {
+        upsertArztAdresse(payload.arzt, arztAdresse);
+      }
 
       await queuePersistRuntimeData();
       showPatientDetailView({ onLock, homeId, patientId });
@@ -3155,6 +5713,8 @@ export function showEditRezeptView({ onLock, homeId, patientId, rezeptId }) {
   }
 
   const items = rezept.items || [];
+  const arztRegistryForEdit = getArztRegistry(runtimeData);
+  const currentArztAdresse = arztRegistryForEdit.find((a) => a.name === (rezept.arzt || ""))?.adresse || "";
 
   render(`
     <div class="card">
@@ -3169,16 +5729,39 @@ export function showEditRezeptView({ onLock, homeId, patientId, rezeptId }) {
         ${getKnownDoctorNames(getRuntimeData()).map((name) => `<option value="${escapeHtml(name)}"></option>`).join("")}
       </datalist>
 
+      ${renderArztAdresseFields(currentArztAdresse)}
+
       <label for="ausstell">Ausstellungsdatum</label>
       <input id="ausstell" type="text" inputmode="numeric" value="${escapeHtml(rezept.ausstell || "")}">
 
-      <div class="checkbox-row">
-        <label class="check-chip"><input id="bg" type="checkbox" ${rezept.bg ? "checked" : ""}> <span>BG</span></label>
-        <label class="check-chip"><input id="dt" type="checkbox" ${rezept.dt ? "checked" : ""}> <span>Doppeltermin</span></label>
-      </div>
+      <label for="icd10">ICD-10 Code</label>
+      <input id="icd10" type="text" placeholder="z.B. M54.5" value="${escapeHtml(rezept.icd10 || "")}">
+
+      <label for="icd10b">2. ICD-10 Code (optional)</label>
+      <input id="icd10b" type="text" placeholder="z.B. M54.5" value="${escapeHtml(rezept.icd10b || "")}">
+
+      ${renderLeitsymptomatikField(rezept.leitsymptomatik || "")}
 
       <h3 style="margin-top:20px;">Leistungen</h3>
       ${renderRezeptItemsEditor(items)}
+
+      <h3 style="margin-top:20px;">Rezeptprüfung</h3>
+      <div class="checkbox-row">
+        <label class="check-chip"><input id="bg" type="checkbox" ${rezept.bg ? "checked" : ""}> <span>BG</span></label>
+        <label class="check-chip"><input id="dt" type="checkbox" ${rezept.dt ? "checked" : ""}> <span>Doppeltermin</span></label>
+        <label class="check-chip"><input id="dringend" type="checkbox" ${rezept.dringend ? "checked" : ""}> <span>Dringender Bedarf</span></label>
+      </div>
+
+      <label for="hausbesuch">Hausbesuch</label>
+      ${renderJaNeinSelect("hausbesuch", rezept.hausbesuch || "")}
+
+      <label for="arztStempel">Arzt-Stempel vorhanden</label>
+      ${renderJaNeinSelect("arztStempel", rezept.arztStempel || "")}
+
+      <label for="arztUnterschrift">Arzt-Unterschrift vorhanden</label>
+      ${renderJaNeinSelect("arztUnterschrift", rezept.arztUnterschrift || "")}
+
+      <div id="rezeptPruefungPanel" style="margin-top:16px;"></div>
 
       <button id="updateRezeptBtn">Änderungen speichern</button>
       <button id="deleteRezeptBtn" class="danger">Rezept löschen</button>
@@ -3191,17 +5774,25 @@ export function showEditRezeptView({ onLock, homeId, patientId, rezeptId }) {
   };
 
   bindDateAutoFormat(document.getElementById("ausstell"));
+  bindIcdAutoFormat(document.getElementById("icd10"));
+  bindIcdAutoFormat(document.getElementById("icd10b"));
   bindRezeptItemsEditor(items);
   bindCheckChipToggles(app);
   bindQuickDocSelectionStyles(app);
   bindSelectableCardChecks(app);
+  bindLeitsymptomatikField();
+  bindRezeptPruefungLive("rezeptPruefungPanel");
+
+  const arztInputEdit = document.getElementById("arzt");
+  bindArztAdresseAutofill(arztInputEdit, arztRegistryForEdit);
 
   document.getElementById("updateRezeptBtn").onclick = async () => {
     const msg = document.getElementById("rezeptMsg");
     msg.className = "error";
     msg.textContent = "";
 
-    const nextItems = collectRezeptItemsFromForm().map((item, idx) => ({
+    const payload = collectRezeptFormPayload();
+    const nextItems = payload.items.map((item, idx) => ({
       itemId: rezept.items?.[idx]?.itemId,
       ...item
     }));
@@ -3213,12 +5804,13 @@ export function showEditRezeptView({ onLock, homeId, patientId, rezeptId }) {
 
     try {
       updateRezept(homeId, patientId, rezeptId, {
-        arzt: document.getElementById("arzt").value.trim(),
-        ausstell: document.getElementById("ausstell").value.trim(),
-        bg: document.getElementById("bg").checked,
-        dt: document.getElementById("dt").checked,
+        ...payload,
         items: nextItems
       });
+      const arztAdresse = collectArztAdresseFromForm();
+      if (payload.arzt && arztAdresse) {
+        upsertArztAdresse(payload.arzt, arztAdresse);
+      }
 
       await queuePersistRuntimeData();
       showPatientDetailView({ onLock, homeId, patientId });
@@ -3262,12 +5854,18 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId }) {
   const frist = getRezeptFristInfo(rezept);
   const timeEntries = getRezeptTimeEntries(rezept);
   const timeSummary = getRezeptTimeSummary(rezept);
+  const pruefung = validateRezeptPflichtfelder(rezept);
 
   render(`
     <div class="card">
       <h2>Rezept</h2>
-      <p><strong>Patient:</strong> ${escapeHtml(`${patient.firstName} ${patient.lastName}`.trim() || "—")}</p>
+      <p><strong>Patient:</strong> ${escapeHtml(formatPatientName(patient) || "—")}</p>
       <button id="backPatientBtn" class="secondary">Zurück zum Patienten</button>
+    </div>
+
+    <div class="card">
+      <h3>Rezeptprüfung</h3>
+      ${renderRezeptPruefungPanel(pruefung)}
     </div>
 
     <details class="accordion">
@@ -3279,8 +5877,15 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId }) {
         <p><strong>Leistungen:</strong> ${escapeHtml(rezeptSummary(rezept))}</p>
         <p><strong>Arzt:</strong> ${escapeHtml(rezept.arzt || "—")}</p>
         <p><strong>Ausstellungsdatum:</strong> ${escapeHtml(rezept.ausstell || "—")}</p>
+        <p><strong>ICD-10 Code:</strong> ${escapeHtml(rezept.icd10 || "—")}</p>
+        ${rezept.icd10b ? `<p><strong>2. ICD-10 Code:</strong> ${escapeHtml(rezept.icd10b)}</p>` : ""}
+        <p><strong>Leitsymptomatik:</strong> ${escapeHtml(rezept.leitsymptomatik || "—")}</p>
+        <p><strong>Hausbesuch:</strong> ${rezept.hausbesuch === "ja" ? "Ja" : rezept.hausbesuch === "nein" ? "Nein" : "—"}</p>
+        <p><strong>Arzt-Stempel vorhanden:</strong> ${rezept.arztStempel === "ja" ? "Ja" : rezept.arztStempel === "nein" ? "Nein" : "—"}</p>
+        <p><strong>Arzt-Unterschrift vorhanden:</strong> ${rezept.arztUnterschrift === "ja" ? "Ja" : rezept.arztUnterschrift === "nein" ? "Nein" : "—"}</p>
         <p><strong>BG:</strong> ${rezept.bg ? "Ja" : "Nein"}</p>
         <p><strong>Doppeltermin:</strong> ${rezept.dt ? "Ja" : "Nein"}</p>
+        <p><strong>Dringender Bedarf:</strong> ${rezept.dringend ? "Ja" : "Nein"}</p>
         <p><strong>Abgegeben:</strong> ${rezept.abgegeben === true ? "Ja" : "Nein"}</p>
         <p><strong>Zeit gesamt:</strong> ${escapeHtml(formatMinutesLabel(timeSummary.totalMinutes))}</p>
         <p><strong>Zeit-Einträge:</strong> ${timeSummary.totalEntries}</p>
@@ -3518,15 +6123,24 @@ function renderAbgabeSheetHtml(rows, options = {}) {
       <div><strong>Therapeut:</strong> ${escapeHtml(therapistName)}</div>
       <div><strong>Erstellt am:</strong> ${escapeHtml(createdAtLabel)}</div>
     </div>
-    ${normalizedRows.map((row) => `
-      <div class="row">
+    ${normalizedRows.map((row) => {
+      // Rahmen-Hervorhebung nur im PDF/Ausdruck, nicht in der App-Ansicht:
+      // Befreit (orange) hat Vorrang vor Doppeltermin (blau).
+      const highlightStyle = row.befreit
+        ? "border:2px solid #c2410c; border-radius:8px; padding:8px 10px;"
+        : row.dt
+          ? "border:2px solid #1d4ed8; border-radius:8px; padding:8px 10px;"
+          : "";
+      return `
+      <div class="row" style="${highlightStyle}">
         <strong>${escapeHtml(row.patient || "—")}</strong> · ${escapeHtml(row.heim || "—")}<br>
         <span class="muted">Arzt: ${escapeHtml(row.arzt || "—")}</span><br>
         <span class="muted">Ausstellung: ${escapeHtml(row.ausstell || "—")}</span><br>
         <span class="muted">Leistung: ${escapeHtml(row.leistung || "—")} ${escapeHtml(row.anzahl || "")}</span><br>
         ${formatAbgabeZusatz(row) ? `<span class="muted">${escapeHtml(formatAbgabeZusatz(row))}</span>` : ""}
       </div>
-    `).join("")}
+    `;
+    }).join("")}
   `;
 }
 
@@ -3582,7 +6196,10 @@ export function showAbgabeView({ onLock, searchText = "", selectedIds = [] }) {
                       Geburt: ${escapeHtml(patient.geb || "—")}
                     </div>
 
-                    ${rezeptRows.map(row => `
+                    ${rezeptRows.map(rawRow => {
+                      // "befreit" steckt im Baum am Patienten, nicht am Rezept selbst.
+                      const row = { ...rawRow, befreit: patient.befreit };
+                      return `
                       <div class="compact-card selectable-card">
                         <label style="display:flex; gap:10px; align-items:flex-start; font-weight:normal;">
                           <input class="abgabeCheck" type="checkbox" data-row-id="${row.rowId}" style="width:auto;" ${selected.has(row.rowId) ? "checked" : ""}>
@@ -3594,7 +6211,8 @@ export function showAbgabeView({ onLock, searchText = "", selectedIds = [] }) {
                           </span>
                         </label>
                       </div>
-                    `).join("")}
+                    `;
+                    }).join("")}
                   </div>
                 </details>
               `;
@@ -4554,6 +7172,427 @@ function escapeHtml(value) {
 // ZEITERFASSUNG – Phase 2
 // ─────────────────────────────────────────────
 
+function buildAbwesenheitMailtoLink({ email, therapistName, type, from, to }) {
+  const artLabel = type === "krank" ? "Krank" : "Urlaub";
+  const subject = `Abwesenheitsmeldung – ${therapistName || "FaSt"}`;
+  const body = [
+    "Guten Tag,",
+    "",
+    "hiermit informiere ich über folgende Abwesenheit:",
+    "",
+    `Therapeut:  ${therapistName || "—"}`,
+    `Art:        ${artLabel}`,
+    `Zeitraum:   ${from} bis ${to}`,
+    "",
+    "Mit freundlichen Grüßen",
+    therapistName || "—"
+  ].join("\n");
+  return `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+export function showAbwesenheitView({ onLock }) {
+  bindLockButton(onLock);
+  setCurrentView("abwesenheit");
+
+  const runtimeData = getRuntimeData();
+  const homes = sortHomesAlpha(runtimeData?.homes || []);
+  const therapistName = runtimeData?.settings?.therapistName || "";
+  let confirmData = null;
+
+  function renderForm() {
+    render(`
+      <div class="card">
+        <h2>Krankmeldung &amp; Urlaub</h2>
+        <button id="backDashboardBtn" class="secondary">Zurück zum Dashboard</button>
+      </div>
+
+      <div class="card">
+        <label>Art der Abwesenheit</label>
+        <div class="checkbox-row">
+          <label class="check-chip"><input type="radio" name="abwesenheitTyp" id="typKrank" value="krank" checked> <span>Krank</span></label>
+          <label class="check-chip"><input type="radio" name="abwesenheitTyp" id="typUrlaub" value="urlaub"> <span>Urlaub</span></label>
+        </div>
+
+        <label for="abwesenheitVon">Von</label>
+        <input id="abwesenheitVon" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
+
+        <label for="abwesenheitBis">Bis</label>
+        <input id="abwesenheitBis" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
+
+        <label style="margin-top:20px;">Einrichtungen informieren</label>
+        ${homes.length === 0 ? `<p class="muted">Keine Einrichtungen vorhanden.</p>` : `
+          <div class="list-stack">
+            ${homes.map((home) => `
+              <label class="check-chip" style="justify-content:flex-start;">
+                <input type="checkbox" class="abwesenheitHomeCheck" value="${escapeHtml(home.homeId)}">
+                <span>${escapeHtml(home.name || "Ohne Name")}${!home.verwaltungsEmail ? ' <span class="muted" style="font-weight:400;">(keine E-Mail hinterlegt)</span>' : ''}</span>
+              </label>
+            `).join("")}
+          </div>
+        `}
+
+        <button id="weiterAbwesenheitBtn" style="margin-top:16px;">Weiter</button>
+        <div id="abwesenheitMsg" class="error"></div>
+      </div>
+    `);
+
+    document.getElementById("backDashboardBtn").onclick = () => showDashboardView({ onLock });
+    bindDateAutoFormat(document.getElementById("abwesenheitVon"));
+    bindDateAutoFormat(document.getElementById("abwesenheitBis"));
+    bindCheckChipToggles(app);
+
+    document.getElementById("weiterAbwesenheitBtn").onclick = () => {
+      const msg = document.getElementById("abwesenheitMsg");
+      msg.textContent = "";
+
+      const type = document.querySelector('input[name="abwesenheitTyp"]:checked')?.value || "krank";
+      const fromValue = document.getElementById("abwesenheitVon").value.trim();
+      const toValue = document.getElementById("abwesenheitBis").value.trim();
+      const normalizedFrom = parseDeDate(fromValue);
+      const normalizedTo = parseDeDate(toValue);
+
+      if (!normalizedFrom || !normalizedTo) {
+        msg.textContent = "Bitte gültige Von- und Bis-Daten eingeben.";
+        return;
+      }
+      if (normalizedTo < normalizedFrom) {
+        msg.textContent = "Bis darf nicht vor Von liegen.";
+        return;
+      }
+
+      const selectedHomeIds = Array.from(document.querySelectorAll(".abwesenheitHomeCheck:checked")).map((el) => el.value);
+      if (selectedHomeIds.length === 0) {
+        msg.textContent = "Bitte mindestens eine Einrichtung zum Informieren auswählen (oder ohne Benachrichtigung nur intern eintragen).";
+      }
+
+      confirmData = { type, from: fromValue, to: toValue, selectedHomeIds };
+      renderConfirm();
+    };
+  }
+
+  function renderConfirm() {
+    const { type, from, to, selectedHomeIds } = confirmData;
+    const artLabel = type === "krank" ? "Krank" : "Urlaub";
+    const selectedHomes = homes.filter((home) => selectedHomeIds.includes(home.homeId));
+
+    render(`
+      <div class="card">
+        <h2>Krankmeldung &amp; Urlaub</h2>
+        <p class="muted">Bitte prüfen und bestätigen.</p>
+      </div>
+
+      <div class="card">
+        <p><strong>Art:</strong> ${escapeHtml(artLabel)}</p>
+        <p><strong>Zeitraum:</strong> ${escapeHtml(from)} bis ${escapeHtml(to)}</p>
+        <p><strong>Therapeut:</strong> ${escapeHtml(therapistName || "—")}</p>
+        <p style="margin-top:12px;"><strong>E-Mail an ausgewählte Einrichtungen senden?</strong></p>
+        ${selectedHomes.length === 0
+          ? `<p class="muted">Keine Einrichtung ausgewählt – es wird nur intern eingetragen, keine E-Mail versendet.</p>`
+          : `<ul>${selectedHomes.map((home) => `<li>${escapeHtml(home.name || "Ohne Name")}</li>`).join("")}</ul>`}
+
+        <div class="row" style="margin-top:16px;">
+          <button id="confirmAbwesenheitBtn">Ja, bestätigen</button>
+          <button id="cancelAbwesenheitBtn" class="secondary">Abbrechen</button>
+        </div>
+      </div>
+    `);
+
+    document.getElementById("cancelAbwesenheitBtn").onclick = () => renderForm();
+
+    document.getElementById("confirmAbwesenheitBtn").onclick = async () => {
+      try {
+        createAbwesenheit({ type, from, to });
+        await queuePersistRuntimeData();
+        renderMailtoLinks({ type, from, to, homes: selectedHomes });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || "Eintrag konnte nicht gespeichert werden.");
+      }
+    };
+  }
+
+  function renderMailtoLinks({ type, from, to, homes: selectedHomes }) {
+    const homesWithEmail = selectedHomes.filter((home) => home.verwaltungsEmail);
+    const homesWithoutEmail = selectedHomes.filter((home) => !home.verwaltungsEmail);
+
+    render(`
+      <div class="card">
+        <h2>Krankmeldung &amp; Urlaub</h2>
+        <p class="muted">Eintrag gespeichert. Bitte pro Einrichtung die E-Mail öffnen und versenden.</p>
+        <button id="backDashboardBtn2" class="secondary">Zurück zum Dashboard</button>
+      </div>
+
+      ${homesWithEmail.length === 0 ? "" : `
+        <div class="card">
+          <h3>E-Mails öffnen</h3>
+          <p class="muted">Öffnet das E-Mail-Programm mit vorausgefülltem Text. Enthält keine Patientennamen.</p>
+          <div class="list-stack">
+            ${homesWithEmail.map((home) => `
+              <div class="compact-card" style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+                <div>${escapeHtml(home.name || "Ohne Name")}</div>
+                <a class="mailtoAbwesenheitLink" style="width:auto;" href="${buildAbwesenheitMailtoLink({ email: home.verwaltungsEmail, therapistName, type, from, to })}"><button type="button" style="width:auto; margin:0;">E-Mail öffnen</button></a>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      `}
+
+      ${homesWithoutEmail.length === 0 ? "" : `
+        <div class="card">
+          <h3>Keine Verwaltungs-E-Mail hinterlegt</h3>
+          <p class="muted">Für folgende Einrichtungen fehlt die Verwaltungs-E-Mail (Einrichtungen → Heim bearbeiten):</p>
+          <ul>${homesWithoutEmail.map((home) => `<li>${escapeHtml(home.name || "Ohne Name")}</li>`).join("")}</ul>
+        </div>
+      `}
+    `);
+
+    document.getElementById("backDashboardBtn2").onclick = () => showDashboardView({ onLock });
+  }
+
+  renderForm();
+}
+
+function buildFreikuvertMailtoLink({ bueroEmail, arztName, arztAdresse, therapistName }) {
+  const subject = `Freikuvert-Bestellung – ${arztName}`;
+  const body = [
+    `Bitte Freikuverts senden an: ${arztName} ${arztAdresse || ""}`.trim(),
+    `Bestellt von: ${therapistName || "—"}`
+  ].join("\n");
+  return `mailto:${bueroEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+export function showFreikuvertView({ onLock }) {
+  bindLockButton(onLock);
+  setCurrentView("freikuvert");
+
+  const runtimeData = getRuntimeData();
+  const aerzte = getArztRegistry(runtimeData);
+  const therapistName = runtimeData?.settings?.therapistName || "";
+  const bueroEmail = runtimeData?.settings?.buero?.email || "";
+
+  function renderForm(message = "") {
+    render(`
+      <div class="card">
+        <h2>Freikuvert bestellen</h2>
+        <button id="backDashboardBtn" class="secondary">Zurück zum Dashboard</button>
+      </div>
+
+      ${!bueroEmail ? `<div class="card"><p class="error" style="margin:0;">Keine Büro-E-Mail-Adresse in den Einstellungen hinterlegt. Bitte zuerst in den Einstellungen ergänzen.</p></div>` : ""}
+
+      <div class="card">
+        <label for="freikuvertArzt">Arzt</label>
+        <select id="freikuvertArzt">
+          <option value="">Bitte wählen</option>
+          ${aerzte.map((arzt) => `<option value="${escapeHtml(arzt.name)}" data-adresse="${escapeHtml(arzt.adresse || "")}">${escapeHtml(arzt.name)}</option>`).join("")}
+        </select>
+        <div id="freikuvertArztAdresseHinweis" class="compact-meta"></div>
+
+        <button id="freikuvertWeiterBtn" style="margin-top:12px;" ${bueroEmail ? "" : "disabled"}>Freikuvert bestellen</button>
+        <div id="freikuvertMsg" class="error">${escapeHtml(message)}</div>
+      </div>
+    `);
+
+    document.getElementById("backDashboardBtn").onclick = () => showDashboardView({ onLock });
+
+    const arztSelect = document.getElementById("freikuvertArzt");
+    const adresseHinweis = document.getElementById("freikuvertArztAdresseHinweis");
+    const updateAdresseHinweis = () => {
+      const adresse = arztSelect.selectedOptions[0]?.dataset.adresse || "";
+      adresseHinweis.textContent = arztSelect.value
+        ? (adresse ? `Adresse: ${adresse}` : "Keine Adresse hinterlegt – bitte beim Anlegen eines Rezepts für diesen Arzt ergänzen.")
+        : "";
+    };
+    arztSelect.onchange = updateAdresseHinweis;
+
+    document.getElementById("freikuvertWeiterBtn").onclick = () => {
+      const arztName = arztSelect.value.trim();
+      const arztAdresse = arztSelect.selectedOptions[0]?.dataset.adresse || "";
+      const msg = document.getElementById("freikuvertMsg");
+      msg.textContent = "";
+
+      if (!arztName) {
+        msg.textContent = "Bitte einen Arzt auswählen.";
+        return;
+      }
+      if (!arztAdresse) {
+        msg.textContent = "Für diesen Arzt ist keine Adresse hinterlegt. Bitte beim Anlegen eines Rezepts für diesen Arzt ergänzen.";
+        return;
+      }
+
+      renderConfirm({ arztName, arztAdresse });
+    };
+  }
+
+  function renderConfirm({ arztName, arztAdresse }) {
+    render(`
+      <div class="card">
+        <h2>Freikuvert bestellen</h2>
+        <p class="muted">Bitte prüfen und bestätigen.</p>
+      </div>
+
+      <div class="card">
+        <p><strong>Freikuverts an ${escapeHtml(arztName)} bestellen?</strong></p>
+        <p><strong>Adresse:</strong> ${escapeHtml(arztAdresse)}</p>
+        <p><strong>Anzahl:</strong> 10 Stück</p>
+        <p><strong>Bestellt von:</strong> ${escapeHtml(therapistName || "—")}</p>
+
+        <div class="row" style="margin-top:16px;">
+          <button id="confirmFreikuvertBtn">Ja, bestellen</button>
+          <button id="cancelFreikuvertBtn" class="secondary">Abbrechen</button>
+        </div>
+      </div>
+    `);
+
+    document.getElementById("cancelFreikuvertBtn").onclick = () => renderForm();
+
+    document.getElementById("confirmFreikuvertBtn").onclick = async () => {
+      try {
+        upsertArztAdresse(arztName, arztAdresse);
+        saveFreikuvertBestellung({ arztName, arztAdresse, therapistName });
+        await queuePersistRuntimeData();
+        renderMailtoLink({ arztName, arztAdresse });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || "Bestellung konnte nicht gespeichert werden.");
+      }
+    };
+  }
+
+  function renderMailtoLink({ arztName, arztAdresse }) {
+    render(`
+      <div class="card">
+        <h2>Freikuvert bestellen</h2>
+        <p class="muted">Bestellung gespeichert. Bitte E-Mail ans Büro öffnen und versenden.</p>
+        <button id="backDashboardBtn2" class="secondary">Zurück zum Dashboard</button>
+      </div>
+
+      <div class="card">
+        <a href="${buildFreikuvertMailtoLink({ bueroEmail, arztName, arztAdresse, therapistName })}"><button type="button">E-Mail ans Büro öffnen</button></a>
+      </div>
+    `);
+
+    document.getElementById("backDashboardBtn2").onclick = () => showDashboardView({ onLock });
+  }
+
+  renderForm();
+}
+
+const FAQ_CHECKLISTE_ITEMS = [
+  "Name Patient vorhanden",
+  "ICD-10 Code vorhanden",
+  "Leitsymptomatik vorhanden",
+  "Heilmittel + Anzahl vorhanden",
+  "Hausbesuch angekreuzt ja/nein",
+  "Arzt-Stempel vorhanden",
+  "Arzt-Unterschrift vorhanden"
+];
+
+export function showFaqView({ onLock }) {
+  bindLockButton(onLock);
+  setCurrentView("faq");
+
+  render(`
+    <div class="card">
+      <h2>FAQ</h2>
+      <p class="muted">Häufige Fragen rund um Rezepte und GKV-Regeln.</p>
+      <button id="backDashboardBtn" class="secondary">Zurück zum Dashboard</button>
+    </div>
+
+    <details class="accordion">
+      <summary>
+        <span>Rezeptgültigkeit</span>
+        <span class="muted">Fristen je Rezepttyp</span>
+      </summary>
+      <div class="accordion-body">
+        <table style="width:100%; border-collapse:collapse; font-size:14px;">
+          <tr style="border-bottom:1px solid var(--border);"><th style="text-align:left; padding:6px 4px;">Rezepttyp</th><th style="text-align:left; padding:6px 4px;">Gültigkeit</th></tr>
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:6px 4px;">GKV normal</td><td style="padding:6px 4px;">28 Kalendertage ab Ausstellungsdatum</td></tr>
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:6px 4px;">GKV dringender Bedarf</td><td style="padding:6px 4px;">14 Kalendertage ab Ausstellungsdatum</td></tr>
+          <tr><td style="padding:6px 4px;">BG-Rezept</td><td style="padding:6px 4px;">14 Kalendertage ab Ausstellungsdatum</td></tr>
+        </table>
+      </div>
+    </details>
+
+    <details class="accordion">
+      <summary>
+        <span>Spätestes Anfangsdatum berechnen</span>
+        <span class="muted">Ausstellungsdatum + Rezepttyp</span>
+      </summary>
+      <div class="accordion-body">
+        <label for="faqAusstell">Ausstellungsdatum</label>
+        <input id="faqAusstell" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
+
+        <label for="faqRezepttyp">Rezepttyp</label>
+        <select id="faqRezepttyp">
+          <option value="normal">GKV normal</option>
+          <option value="dringend">GKV dringender Bedarf</option>
+          <option value="bg">BG-Rezept</option>
+        </select>
+
+        <button id="faqBerechnenBtn" style="margin-top:12px;">Berechnen</button>
+        <div id="faqBerechnenResult" style="margin-top:12px;"></div>
+      </div>
+    </details>
+
+    <details class="accordion">
+      <summary>
+        <span>Unterbrechungsfristen</span>
+        <span class="muted">Nach Anzahl Behandlungen</span>
+      </summary>
+      <div class="accordion-body">
+        <table style="width:100%; border-collapse:collapse; font-size:14px;">
+          <tr style="border-bottom:1px solid var(--border);"><th style="text-align:left; padding:6px 4px;">Anzahl Behandlungen</th><th style="text-align:left; padding:6px 4px;">Unterbrechungsfrist</th></tr>
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:6px 4px;">Bis 6 Behandlungen</td><td style="padding:6px 4px;">3 Monate ab erster Behandlung</td></tr>
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:6px 4px;">Mehr als 6 Behandlungen</td><td style="padding:6px 4px;">6 Monate ab erster Behandlung</td></tr>
+          <tr><td style="padding:6px 4px;">BG-Rezept</td><td style="padding:6px 4px;">28 Kalendertage ab Ausstellungsdatum</td></tr>
+        </table>
+      </div>
+    </details>
+
+    <details class="accordion">
+      <summary>
+        <span>Rezept-Checkliste</span>
+        <span class="muted">Pflichtangaben</span>
+      </summary>
+      <div class="accordion-body">
+        <ul style="margin:0; padding-left:20px; line-height:1.7;">
+          ${FAQ_CHECKLISTE_ITEMS.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+        </ul>
+      </div>
+    </details>
+  `);
+
+  document.getElementById("backDashboardBtn").onclick = () => showDashboardView({ onLock });
+
+  bindDateAutoFormat(document.getElementById("faqAusstell"));
+  bindCheckChipToggles(app);
+
+  document.getElementById("faqBerechnenBtn").onclick = () => {
+    const ausstell = document.getElementById("faqAusstell").value.trim();
+    const typ = document.getElementById("faqRezepttyp").value;
+    const resultEl = document.getElementById("faqBerechnenResult");
+
+    const fakeRezept = {
+      ausstell,
+      bg: typ === "bg",
+      dringend: typ === "dringend",
+      items: [{ type: "KG", count: "6" }]
+    };
+
+    const frist = getRezeptFristInfo(fakeRezept);
+    if (frist.mode === "unknown") {
+      resultEl.innerHTML = `<p class="error" style="margin:0;">Bitte ein gültiges Ausstellungsdatum eingeben.</p>`;
+      return;
+    }
+
+    resultEl.innerHTML = `
+      <p class="pill-green" style="display:block;">Spätester Behandlungsbeginn: ${escapeHtml(frist.latestStartText)}</p>
+      <p class="muted">${escapeHtml(frist.detailsText)}</p>
+    `;
+  };
+
+}
+
 export function showStundenkontoView({
   onLock,
   calYear = null,
@@ -5327,19 +8366,22 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       <label for="zeitDatumInput">Datum</label>
       <input id="zeitDatumInput" type="text" value="${escapeHtml(today)}" placeholder="TT.MM.JJJJ" inputmode="numeric" style="margin-bottom:16px;">
 
-      <div class="compact-card" style="margin:0 0 16px 0; padding:14px; text-align:center;">
-        <div class="compact-meta" style="margin-bottom:4px;">Automatische Zeit aus Rezept</div>
-        <div style="font-size:32px; font-weight:700; color:var(--primary);">${autoMin > 0 ? `${autoMin} Min` : '—'}</div>
-        ${rezept.dt ? `<div class="compact-meta" style="margin-top:4px;">Doppelbehandlung berücksichtigt</div>` : ''}
-      </div>
+      <label>Dauer</label>
+      ${renderRadioGroup("zeitDauer", [
+        { val: "20", label: "20 Min" },
+        { val: "40", label: "40 Min" },
+        { val: "60", label: "60 Min" }
+      ], String([20, 40, 60].includes(autoMin) ? autoMin : 20))}
+      ${rezept.dt ? `<div class="compact-meta" style="margin-top:-6px; margin-bottom:12px;">Doppelbehandlung berücksichtigt</div>` : ''}
 
       <input id="zeitNotizInput" type="text" placeholder="Notiz optional: z. B. Hausbesuch ...">
 
-      <button id="zeitBuchenBtn"${autoMin === 0 ? ' disabled' : ''}>Zeit buchen</button>
+      <button id="zeitBuchenBtn">Zeit buchen</button>
       <button id="zeitBackRezeptBtn" class="secondary">Zurück</button>
       <div id="zeitBuchenMsg" class="muted" style="margin-top:10px;"></div>
     </div>
   `);
+  bindCheckChipToggles(app);
 
   const backBtn = document.getElementById("zeitBackRezeptBtn");
   backBtn.addEventListener("touchend", (e) => {
@@ -5353,52 +8395,51 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     showZeiterfassungView({ onLock, selectedHomeId });
   });
 
-  if (autoMin > 0) {
-    document.getElementById("zeitBuchenBtn").onclick = async () => {
-      const notiz = document.getElementById("zeitNotizInput").value.trim();
-      const datumInput = document.getElementById("zeitDatumInput").value.trim();
-      const msg = document.getElementById("zeitBuchenMsg");
+  document.getElementById("zeitBuchenBtn").onclick = async () => {
+    const notiz = document.getElementById("zeitNotizInput").value.trim();
+    const datumInput = document.getElementById("zeitDatumInput").value.trim();
+    const msg = document.getElementById("zeitBuchenMsg");
+    const minutes = Number(getRadioValue("zeitDauer")) || 20;
 
-      const normalizedDatum = normalizeDeDateInput(datumInput) || datumInput;
-      if (!normalizedDatum || !parseDeDate(normalizedDatum)) {
-        msg.textContent = "Bitte ein gültiges Datum eingeben (TT.MM.JJJJ).";
-        return;
-      }
+    const normalizedDatum = normalizeDeDateInput(datumInput) || datumInput;
+    if (!normalizedDatum || !parseDeDate(normalizedDatum)) {
+      msg.textContent = "Bitte ein gültiges Datum eingeben (TT.MM.JJJJ).";
+      return;
+    }
 
-      msg.textContent = "Wird gespeichert...";
+    msg.textContent = "Wird gespeichert...";
 
-      try {
-        mutateRuntimeData(data => {
-          const h = (data.homes || []).find(x => x.homeId === selectedHomeId);
-          if (!h) return;
-          const p = (h.patients || []).find(x => x.patientId === selectedPatientId);
-          if (!p) return;
-          const r = (p.rezepte || []).find(x => x.rezeptId === selectedRezeptId);
-          if (!r) return;
-          if (!Array.isArray(r.timeEntries)) r.timeEntries = [];
-          r.timeEntries.push({
-            timeEntryId: generateId("time"),
-            date: normalizedDatum,
-            type: "behandlung",
-            minutes: autoMin,
-            note: notiz || "",
-            createdAt: new Date().toISOString()
-          });
+    try {
+      mutateRuntimeData(data => {
+        const h = (data.homes || []).find(x => x.homeId === selectedHomeId);
+        if (!h) return;
+        const p = (h.patients || []).find(x => x.patientId === selectedPatientId);
+        if (!p) return;
+        const r = (p.rezepte || []).find(x => x.rezeptId === selectedRezeptId);
+        if (!r) return;
+        if (!Array.isArray(r.timeEntries)) r.timeEntries = [];
+        r.timeEntries.push({
+          timeEntryId: generateId("time"),
+          date: normalizedDatum,
+          type: "behandlung",
+          minutes,
+          note: notiz || "",
+          createdAt: new Date().toISOString()
         });
-        const scrollPosition = window.scrollY;
-        await queuePersistRuntimeData();
+      });
+      const scrollPosition = window.scrollY;
+      await queuePersistRuntimeData();
 
-        showZeiterfassungView({
-          onLock,
-          selectedHomeId,
-          successMsg: `✓ ${autoMin} Min für ${patientName} am ${normalizedDatum} gebucht`,
-          scrollTo: scrollPosition
-        });
-      } catch (err) {
-        msg.textContent = "Fehler beim Speichern: " + err.message;
-      }
-    };
-  }
+      showZeiterfassungView({
+        onLock,
+        selectedHomeId,
+        successMsg: `✓ ${minutes} Min für ${patientName} am ${normalizedDatum} gebucht`,
+        scrollTo: scrollPosition
+      });
+    } catch (err) {
+      msg.textContent = "Fehler beim Speichern: " + err.message;
+    }
+  };
 }
 
 // Hilfsfunktion für Zeiterfassung – berechnet Minuten aus Rezept

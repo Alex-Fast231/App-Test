@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FaSt-Doku</title>
+  <title>FaSt App</title>
 
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon-192.png">
@@ -229,9 +229,10 @@
   padding:14px 16px;
   font-weight:600;
   display:flex;
+  flex-wrap:wrap;
   justify-content:space-between;
   align-items:center;
-  gap:10px;
+  gap:4px 10px;
   background:#E2E6EC;
   color:#2A2F36;
   font-weight:600;
@@ -244,8 +245,8 @@
 }
 
 .accordion summary > span:last-child{
-  flex:0 0 auto;
-  white-space:nowrap;
+  flex:0 1 auto;
+  min-width:0;
 }
 
 .accordion summary:hover{
@@ -295,6 +296,15 @@
       align-items:center;
     }
 
+    .checkbox-row-column{
+      flex-direction:column;
+      align-items:stretch;
+    }
+
+    .checkbox-row-column .check-chip{
+      flex-basis:auto;
+    }
+
     .check-chip{
       display:flex;
       align-items:center;
@@ -309,7 +319,8 @@
       min-width:0;
     }
 
-    .check-chip input[type="checkbox"]{
+    .check-chip input[type="checkbox"],
+    .check-chip input[type="radio"]{
       width:auto !important;
       margin:0;
       cursor:pointer;
@@ -351,57 +362,21 @@
   flex-direction:column;
   gap:10px;
 }
+
+.list-stack .check-chip{
+  flex-basis:auto;
+}
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">FaSt-Doku<span id="appVersionLabel" style="display:block; font-size:11px; font-weight:400; opacity:0.6; margin-top:2px;"></span></div>
+    <div class="brand">FaSt App<span id="appVersionLabel" style="display:block; font-size:11px; font-weight:400; opacity:0.6; margin-top:2px;"></span></div>
     <div class="header-actions" style="display:flex; gap:8px;">
-      <button id="updateAvailableBtn" class="secondary" style="display:none; background:#166534;">⬇️ Update</button>
       <button id="lockBtn" class="secondary" style="display:none;">Sperren</button>
     </div>
   </header>
 
   <main id="app"></main>
-
-  <script type="module">
-    if ("serviceWorker" in navigator) {
-      import("./core/update.js").then(({ initServiceWorkerUpdates, onUpdateAvailable, applyUpdate, getActiveVersion, getWaitingVersion }) => {
-        initServiceWorkerUpdates();
-
-        const updateBtn = document.getElementById("updateAvailableBtn");
-        const versionLabel = document.getElementById("appVersionLabel");
-
-        function refreshVersionLabel() {
-          getActiveVersion().then((version) => {
-            if (version && versionLabel) {
-              versionLabel.textContent = version;
-            }
-          });
-        }
-        refreshVersionLabel();
-
-        onUpdateAvailable(() => {
-          updateBtn.style.display = "inline-block";
-          getWaitingVersion().then((version) => {
-            if (version) {
-              updateBtn.textContent = `⬇️ Update (${version})`;
-            }
-          });
-        });
-
-        updateBtn.onclick = () => {
-          updateBtn.disabled = true;
-          updateBtn.textContent = "Wird aktualisiert…";
-          applyUpdate();
-        };
-
-        // Nach erfolgreichem Update lädt sich die Seite neu (siehe
-        // core/update.js controllerchange) - dann zeigt refreshVersionLabel
-        // beim nächsten Laden automatisch die neue, wirklich aktive Version.
-      });
-    }
-  </script>
 
   <script src="./zip-full.min.js"></script>
   <script type="module" src="./core/boot.js"></script>

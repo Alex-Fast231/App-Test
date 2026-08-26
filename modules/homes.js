@@ -1,6 +1,7 @@
 import { getRuntimeData, mutateRuntimeData } from "../core/app-core.js";
-import { compareDeDates, isDateInRange } from "../core/date-utils.js";
-import { generateId, getRezeptAusstellungsdatum } from "../core/utils.js";
+import { compareDeDates, isDateInRange, parseComparableDate, getComparableFromDate } from "../core/date-utils.js";
+import { generateId, getRezeptAusstellungsdatum, formatPatientName } from "../core/utils.js";
+import { REMINDER_INTERVAL_DAYS } from "./assessment.js";
 
 function normalizeTimeType(type) {
   return ["behandlung", "dokumentation", "besprechung", "manuell"].includes(String(type || "").trim())
@@ -163,7 +164,7 @@ function getPointForPatient(home, patient, kilometerState) {
   if (patient?.hb && hbAddress) {
     return {
       pointId: `hb:${patient.patientId}`,
-      label: `${patient.firstName || ""} ${patient.lastName || ""}`.trim() || "Hausbesuch",
+      label: formatPatientName(patient) || "Hausbesuch",
       address: hbAddress,
       kind: "hb"
     };
@@ -212,7 +213,7 @@ function collectKilometerPoints(data) {
       if (patient?.hb && String(patient?.hbAddress || '').trim()) {
         addPoint({
           pointId: `hb:${patient.patientId}`,
-          label: `${patient.firstName || ''} ${patient.lastName || ''}`.trim() || 'Hausbesuch',
+          label: formatPatientName(patient) || 'Hausbesuch',
           address: String(patient.hbAddress || '').trim(),
           kind: 'hb'
         });
@@ -324,12 +325,6 @@ function appendTravelLogIfPossible(data, homeId, patientId, dateInput, relatedEn
 
   kilometerState.travelLog.push(travel);
   return travel;
-}
-
-export function getPendingKilometerContext(homeId, patientId, dateInput) {
-  const data = getRuntimeData();
-  if (!data) throw new Error("Kein runtimeData Zustand vorhanden");
-  return buildPendingKilometerContextFromData(data, homeId, patientId, dateInput);
 }
 
 export function saveKilometerStartPoint(payload) {
@@ -620,12 +615,13 @@ export function finalizeKilometerExport(fromDate, toDate, { snapshotHtml = '', n
 }
 
 
-export function createHome({ name, adresse }) {
+export function createHome({ name, adresse, verwaltungsEmail = "" }) {
   mutateRuntimeData((data) => {
     data.homes.push({
       homeId: generateId("home"),
       name: name.trim(),
       adresse: adresse.trim(),
+      verwaltungsEmail: String(verwaltungsEmail || "").trim(),
       patients: []
     });
   });
@@ -690,23 +686,32 @@ export function getHomeById(data, homeId) {
 }
 
 export function createPatient(homeId, payload) {
+  const patientId = generateId("patient");
+
   mutateRuntimeData((data) => {
     const home = getHomeById(data, homeId);
     if (!home) throw new Error("Heim nicht gefunden");
 
     home.patients.push({
-      patientId: generateId("patient"),
+      patientId,
       firstName: (payload.firstName || "").trim(),
       lastName: (payload.lastName || "").trim(),
+      anrede: ["frau", "herr"].includes(payload.anrede) ? payload.anrede : "",
       birthDate: (payload.birthDate || "").trim(),
       befreit: !!payload.befreit,
       hb: !!payload.hb,
       verstorben: !!payload.verstorben,
+      zuzahlungsstatus: "",
+      zuzahlungsstatusSetAt: "",
+      zuzahlungReminderAt: "",
       entries: [],
       rezepte: [],
+      diagnoseZuordnung: [],
       zeitMeta: {}
     });
   });
+
+  return patientId;
 }
 
 
@@ -721,7 +726,9 @@ export function updatePatient(homeId, patientId, payload) {
     patient.firstName = String(payload.firstName || "").trim();
     patient.lastName = String(payload.lastName || "").trim();
     patient.birthDate = String(payload.birthDate || "").trim();
-    patient.befreit = !!payload.befreit;
+    if (payload.befreit !== undefined) {
+      patient.befreit = !!payload.befreit;
+    }
     patient.hb = !!payload.hb;
     patient.verstorben = !!payload.verstorben;
   });
@@ -729,6 +736,254 @@ export function updatePatient(homeId, patientId, payload) {
 
 export function getPatientById(home, patientId) {
   return (home?.patients || []).find((patient) => patient.patientId === patientId) || null;
+}
+
+function addDaysToComparable(comparable, days) {
+  const date = parseComparableDate(comparable);
+  if (!date) return "";
+  const d = new Date(date.getTime());
+  d.setDate(d.getDate() + days);
+  return getComparableFromDate(d);
+}
+
+export function scheduleAssessment(homeId, patientId, dueDateComparable) {
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    if (!home) throw new Error("Heim nicht gefunden");
+
+    const patient = getPatientById(home, patientId);
+    if (!patient) throw new Error("Patient nicht gefunden");
+
+    patient.nextAssessmentDueAt = String(dueDateComparable || "").trim();
+  });
+}
+
+// assessmentPayload: vollständiges strukturiertes Assessment-Ergebnis (siehe
+// modules/assessment.js für die Testdefinitionen). intervalMonths steuert das
+// Folgeintervall: 3 -> 90 Tage, 6 -> 180 Tage (Vorgabe: "alle 90 Tage").
+export function saveAssessmentResult(homeId, patientId, assessmentPayload, intervalMonths) {
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    if (!home) throw new Error("Heim nicht gefunden");
+
+    const patient = getPatientById(home, patientId);
+    if (!patient) throw new Error("Patient nicht gefunden");
+
+    if (!Array.isArray(patient.assessments)) patient.assessments = [];
+    patient.assessments.unshift({
+      id: generateId("assessment"),
+      createdAt: new Date().toISOString(),
+      ...assessmentPayload
+    });
+
+    const mrcPosition = assessmentPayload?.neuro?.mrc?.position;
+    if (mrcPosition && !patient.assessmentMrcPosition) {
+      patient.assessmentMrcPosition = mrcPosition;
+    }
+
+    const days = REMINDER_INTERVAL_DAYS[intervalMonths] || REMINDER_INTERVAL_DAYS[3];
+    patient.nextAssessmentDueAt = addDaysToComparable(assessmentPayload.date, days);
+  });
+}
+
+export function getFaelligeAssessmentErinnerungen(data) {
+  const today = getComparableFromDate(new Date());
+  const result = [];
+
+  (data?.homes || []).forEach((home) => {
+    (home.patients || []).forEach((patient) => {
+      if (patient.verstorben) return;
+      const dueAt = String(patient.nextAssessmentDueAt || "").trim();
+      if (dueAt && dueAt <= today) {
+        result.push({
+          homeId: home.homeId,
+          patientId: patient.patientId,
+          patientName: `${patient.lastName || ""}, ${patient.firstName || ""}`.replace(/^,\s*/, "").trim() || "Ohne Namen",
+          dueAt
+        });
+      }
+    });
+  });
+
+  return result;
+}
+
+export function getArztRegistry(data) {
+  const namesFromRezepte = getDoctorList(data);
+  const registryByName = new Map();
+
+  (data?.aerzte || []).forEach((arzt) => {
+    const name = String(arzt?.name || "").trim();
+    if (name) registryByName.set(name, arzt.adresse || "");
+  });
+
+  namesFromRezepte.forEach((name) => {
+    if (!registryByName.has(name)) registryByName.set(name, "");
+  });
+
+  return Array.from(registryByName.entries())
+    .map(([name, adresse]) => ({ name, adresse }))
+    .sort((a, b) => a.name.localeCompare(b.name, "de"));
+}
+
+export function upsertArztAdresse(name, adresse) {
+  const normalizedName = String(name || "").trim();
+  if (!normalizedName) throw new Error("Arztname fehlt");
+
+  mutateRuntimeData((data) => {
+    if (!Array.isArray(data.aerzte)) data.aerzte = [];
+    const existing = data.aerzte.find((arzt) => String(arzt.name || "").trim() === normalizedName);
+
+    if (existing) {
+      existing.adresse = String(adresse || "").trim();
+      existing.updatedAt = new Date().toISOString();
+    } else {
+      data.aerzte.push({
+        id: generateId("arzt"),
+        name: normalizedName,
+        adresse: String(adresse || "").trim(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+    }
+  });
+}
+
+export function saveFreikuvertBestellung({ arztName, arztAdresse, therapistName }) {
+  const entry = {
+    id: generateId("freikuvert"),
+    arztName: String(arztName || "").trim(),
+    arztAdresse: String(arztAdresse || "").trim(),
+    anzahl: 10,
+    therapistName: String(therapistName || "").trim(),
+    createdAt: new Date().toISOString()
+  };
+
+  mutateRuntimeData((data) => {
+    if (!Array.isArray(data.freikuvertHistory)) data.freikuvertHistory = [];
+    data.freikuvertHistory.unshift(entry);
+  });
+
+  return entry;
+}
+
+export function createAbwesenheit({ type, from, to }) {
+  const entry = {
+    id: generateId("abwesenheit"),
+    type: type === "krank" ? "krank" : "urlaub",
+    from: String(from || "").trim(),
+    to: String(to || "").trim(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  mutateRuntimeData((data) => {
+    if (!Array.isArray(data.abwesenheiten)) data.abwesenheiten = [];
+    data.abwesenheiten.push(entry);
+  });
+
+  return entry;
+}
+
+const ZUZAHLUNG_REMINDER_INTERVAL_DAYS = 7;
+
+export function setZuzahlungsstatus(homeId, patientId, status) {
+  const normalized = ["ja", "nein", "ungeklaert"].includes(status) ? status : "";
+
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    if (!home) throw new Error("Heim nicht gefunden");
+
+    const patient = getPatientById(home, patientId);
+    if (!patient) throw new Error("Patient nicht gefunden");
+
+    patient.zuzahlungsstatus = normalized;
+    patient.zuzahlungsstatusSetAt = new Date().toISOString();
+    patient.befreit = normalized === "ja";
+
+    if (normalized === "ungeklaert") {
+      const reminder = new Date();
+      reminder.setDate(reminder.getDate() + ZUZAHLUNG_REMINDER_INTERVAL_DAYS);
+      patient.zuzahlungReminderAt = reminder.toISOString();
+    } else {
+      patient.zuzahlungReminderAt = "";
+    }
+  });
+}
+
+export function acknowledgeZuzahlungReminder(homeId, patientId) {
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    if (!home) return;
+
+    const patient = getPatientById(home, patientId);
+    if (!patient || patient.zuzahlungsstatus !== "ungeklaert") return;
+
+    const reminder = new Date();
+    reminder.setDate(reminder.getDate() + ZUZAHLUNG_REMINDER_INTERVAL_DAYS);
+    patient.zuzahlungReminderAt = reminder.toISOString();
+  });
+}
+
+export function getFaelligeZuzahlungErinnerungen(data) {
+  const now = Date.now();
+  const result = [];
+
+  (data?.homes || []).forEach((home) => {
+    (home.patients || []).forEach((patient) => {
+      if (patient.verstorben) return;
+      if (patient.zuzahlungsstatus !== "ungeklaert") return;
+
+      const reminderAt = patient.zuzahlungReminderAt ? new Date(patient.zuzahlungReminderAt).getTime() : 0;
+      if (reminderAt && reminderAt <= now) {
+        result.push({
+          homeId: home.homeId,
+          patientId: patient.patientId,
+          patientName: `${patient.lastName || ""}, ${patient.firstName || ""}`.replace(/^,\s*/, "").trim() || "Ohne Namen"
+        });
+      }
+    });
+  });
+
+  return result;
+}
+
+export function saveDiagnoseZuordnung(homeId, patientId, entry) {
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    if (!home) throw new Error("Heim nicht gefunden");
+
+    const patient = getPatientById(home, patientId);
+    if (!patient) throw new Error("Patient nicht gefunden");
+
+    if (!Array.isArray(patient.diagnoseZuordnung)) {
+      patient.diagnoseZuordnung = [];
+    }
+
+    patient.diagnoseZuordnung.unshift({
+      id: generateId("diagzuordnung"),
+      input: (entry?.input || "").trim(),
+      icd10: (entry?.icd10 || "").trim(),
+      gruppe: (entry?.gruppe || "").trim(),
+      gruppeLabel: (entry?.gruppeLabel || "").trim(),
+      empfehlung: (entry?.empfehlung || "").trim(),
+      createdAt: new Date().toISOString()
+    });
+
+    patient.diagnoseZuordnung = patient.diagnoseZuordnung.slice(0, 20);
+  });
+}
+
+export function deleteDiagnoseZuordnung(homeId, patientId, entryId) {
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    if (!home) throw new Error("Heim nicht gefunden");
+
+    const patient = getPatientById(home, patientId);
+    if (!patient) throw new Error("Patient nicht gefunden");
+
+    patient.diagnoseZuordnung = (patient.diagnoseZuordnung || []).filter((item) => item.id !== entryId);
+  });
 }
 
 export function deletePatient(homeId, patientId) {
@@ -796,6 +1051,13 @@ export function createRezept(homeId, patientId, payload) {
       ausstell: (payload.ausstell || "").trim(),
       bg: !!payload.bg,
       dt: !!payload.dt,
+      dringend: !!payload.dringend,
+      icd10: (payload.icd10 || "").trim(),
+      icd10b: (payload.icd10b || "").trim(),
+      leitsymptomatik: (payload.leitsymptomatik || "").trim(),
+      hausbesuch: payload.hausbesuch === "ja" || payload.hausbesuch === "nein" ? payload.hausbesuch : "",
+      arztStempel: payload.arztStempel === "ja" || payload.arztStempel === "nein" ? payload.arztStempel : "",
+      arztUnterschrift: payload.arztUnterschrift === "ja" || payload.arztUnterschrift === "nein" ? payload.arztUnterschrift : "",
       abgegeben: false,
       items,
       entries: [],
@@ -838,6 +1100,13 @@ export function updateRezept(homeId, patientId, rezeptId, payload) {
     rezept.ausstell = (payload.ausstell || "").trim();
     rezept.bg = !!payload.bg;
     rezept.dt = !!payload.dt;
+    rezept.dringend = !!payload.dringend;
+    rezept.icd10 = (payload.icd10 || "").trim();
+    rezept.icd10b = (payload.icd10b || "").trim();
+    rezept.leitsymptomatik = (payload.leitsymptomatik || "").trim();
+    rezept.hausbesuch = payload.hausbesuch === "ja" || payload.hausbesuch === "nein" ? payload.hausbesuch : "";
+    rezept.arztStempel = payload.arztStempel === "ja" || payload.arztStempel === "nein" ? payload.arztStempel : "";
+    rezept.arztUnterschrift = payload.arztUnterschrift === "ja" || payload.arztUnterschrift === "nein" ? payload.arztUnterschrift : "";
     rezept.abgegeben = rezept.abgegeben === true;
     rezept.items = items;
 
@@ -1278,7 +1547,7 @@ export function buildNachbestellRows(data) {
         rows.push({
           rowId: `${home.homeId}_${patient.patientId}_${rezept.rezeptId}`,
           doctor: rezept.arzt || "",
-          patient: `${patient.firstName || ""} ${patient.lastName || ""}`.trim(),
+          patient: formatPatientName(patient),
           patientFirstName: patient.firstName || "",
           patientLastName: patient.lastName || "",
           geb: patient.birthDate || "",
@@ -1367,23 +1636,6 @@ export function deleteAbgabeHistoryItem(historyId) {
   if (!targetId) return;
   mutateRuntimeData((data) => {
     data.abgabeHistory = (data.abgabeHistory || []).filter((item) => item.id !== targetId);
-  });
-}
-
-export function saveNachbestellHistory(title, doctor, rows) {
-  mutateRuntimeData((data) => {
-    data.nachbestellHistory.unshift({
-      id: generateId("nachbestellung"),
-      createdAt: new Date().toISOString(),
-      title: title || "Nachbestellung",
-      doctor: doctor || "",
-      lines: rows.map((row) => ({
-        patient: row.patient || "",
-        geb: row.geb || "",
-        heim: row.heim || "",
-        text: row.text || ""
-      }))
-    });
   });
 }
 

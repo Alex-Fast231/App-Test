@@ -77,6 +77,24 @@ export function getRezeptFristInfo(rezept) {
     };
   }
 
+  if (rezept?.dringend) {
+    const latestStart = addDays(ausstellDate, 14);
+    const total = totalAnwendungsmenge(rezept?.items || []);
+    const validRule = total <= 6
+      ? "1. Behandlung + 3 Monate"
+      : "1. Behandlung + 6 Monate";
+    const daysRemaining = diffDays(today, latestStart);
+    return {
+      mode: "dringend",
+      statusText: `Beginn bis ${formatDeDate(latestStart)}`,
+      detailsText: `GKV dringender Bedarf: Beginn innerhalb 14 Tagen · Gesamtmenge ${total}x · ${validRule}`,
+      latestStartText: formatDeDate(latestStart),
+      validUntilText: validRule,
+      traffic: getTrafficLevel(daysRemaining),
+      daysRemaining
+    };
+  }
+
   if (isBlanko(rezept)) {
     const latestStart = addDays(ausstellDate, 28);
     const validUntil = addMonthsSafe(ausstellDate, 4);

@@ -1,5 +1,7 @@
+import { generateId } from "../core/utils.js";
+
 export const APP_SCHEMA_VERSION = 3;
-export const APP_VERSION = "3.0.0";
+export const APP_VERSION = "3.9.33";
 export const APP_MODULE = "doku";
 
 export const PRACTICE_ADDRESS = ``;
@@ -15,6 +17,7 @@ export function createEmptyAppData() {
     exportTimestamp: "",
 
     settings: {
+      therapistId: generateId("therapist"),
       therapistName: "",
       therapistFax: "",
       practicePhone: "",
@@ -23,7 +26,16 @@ export function createEmptyAppData() {
       weeklyHours: "",
       fastStartDatum: "",
       stundenStartsaldoMinuten: 0,
-      privacyMode: "full",
+      zertifikate: {
+        kgzns: false,
+        mt: false,
+        mld: false
+      },
+      supportUrl: "",
+      buero: {
+        email: ""
+      },
+      assessmentIntervalMonths: 3,
       createdAt: now,
       updatedAt: now
     },
@@ -57,18 +69,21 @@ export function createEmptyAppData() {
     abwesenheiten: [],
     specialDays: [],
     stundenAbgleiche: [],
+    aerzte: [],
+    freikuvertHistory: [],
 
     abgabeHistory: [],
     nachbestellHistory: [],
+    autoExportHistory: [],
 
     security: {
       log: [],
-      lastSecurityChangeAt: "",
-      privacyMode: "full"
+      lastSecurityChangeAt: ""
     },
 
     ui: {
-      lastBackupAt: ""
+      lastBackupAt: "",
+      lastAutoExportAt: ""
     }
   };
 }
