@@ -1,4 +1,4 @@
-import { createEmptyAppData, APP_VERSION } from "../data/schema.js";
+import { createEmptyAppData, APP_VERSION, PRACTICE_ADDRESS, PRACTICE_PHONE } from "../data/schema.js";
 import { setupSecurity, unlockWithPIN } from "../security/auth.js";
 import { getRemainingLockoutMs } from "../security/lock.js";
 import {
@@ -17,6 +17,7 @@ import {
   mutateRuntimeData
 } from "../core/app-core.js";
 import { loadEncryptedAppData } from "../storage/secure-store.js";
+import { closeDatabase } from "../storage/indexeddb.js";
 import { logSecurityEvent } from "../security/security-log.js";
 import {
   createHome,
@@ -151,11 +152,12 @@ function renderRezeptMarkerLine(rezept, frist) {
 
   return `
     <div style="margin-bottom:8px;">
+      ${rezept.privat ? `<span class="pill">🔒 Privat</span>` : ""}
       ${rezept.bg ? `<span class="pill">BG</span>` : ""}
       ${rezept.dt ? `<span class="pill">DT</span>` : ""}
       ${rezept.dringend ? `<span class="pill">Dringend</span>` : ""}
       ${blanko ? `<span class="pill">Blanko</span>` : ""}
-      <span class="${trafficClass}">${escapeHtml(frist.statusText || "Frist")}</span>
+      ${rezept.privat ? "" : `<span class="${trafficClass}">${escapeHtml(frist.statusText || "Frist")}</span>`}
     </div>
   `;
 }
@@ -372,18 +374,6 @@ function collectAllTimeEntries(data) {
     });
   });
   return rows;
-}
-
-function getTotalTrackedMinutes(data, targetDate = "") {
-  const normalizedDate = String(targetDate || '').trim();
-  const fastStartComparable = getFastStartDatumComparable(data?.settings);
-  return collectAllTimeEntries(data)
-    .filter((entry) => !normalizedDate || entry.date === normalizedDate)
-    .filter((entry) => {
-      const entryComparable = parseDeDate(entry.date);
-      return !fastStartComparable || !entryComparable || entryComparable >= fastStartComparable;
-    })
-    .reduce((sum, entry) => sum + entry.minutes, 0);
 }
 
 function getTimePeriodSummary(data, fromDate, toDate) {
@@ -1086,10 +1076,10 @@ function renderJaNeinSelect(id, value) {
 }
 
 const LEITSYMPTOMATIK_OPTIONEN = [
-  { val: "a", label: "a) Schädigung der Motorik", text: "a) Schädigung der Motorik (Bewegungs-, Koordinations- oder Kraftdefizit)" },
-  { val: "b", label: "b) Schädigung der Sensibilität", text: "b) Schädigung der Sensibilität / Wahrnehmung" },
-  { val: "c", label: "c) Sonstige Schädigung", text: "c) Schädigung sonstiger Art mit Auswirkung auf die Bewegungsfähigkeit" },
-  { val: "custom", label: "Patientenindividuell (Freitext)", text: "" }
+  { val: "a", label: "A", text: "a) Schädigung der Motorik (Bewegungs-, Koordinations- oder Kraftdefizit)" },
+  { val: "b", label: "B", text: "b) Schädigung der Sensibilität / Wahrnehmung" },
+  { val: "c", label: "C", text: "c) Schädigung sonstiger Art mit Auswirkung auf die Bewegungsfähigkeit" },
+  { val: "custom", label: "Patient individuell", text: "" }
 ];
 
 // Leitsymptomatik wird intern weiterhin als ein einzelner String gespeichert
@@ -1113,16 +1103,16 @@ function renderLeitsymptomatikField(currentValue) {
   return `
     <label>Leitsymptomatik</label>
     <p class="muted" style="margin-top:-4px;">Mehrfachauswahl möglich.</p>
-    <div class="checkbox-row checkbox-row-column">
+    <div class="checkbox-row">
       ${LEITSYMPTOMATIK_OPTIONEN.filter((opt) => opt.val !== "custom").map((opt) => `
-        <label class="check-chip" style="justify-content:flex-start; margin-bottom:6px;">
+        <label class="check-chip">
           <input type="checkbox" name="leitsymptomatikWahl" class="leitsymptomatikWahl" value="${escapeHtml(opt.val)}" ${selected.has(opt.val) ? "checked" : ""}>
           <span>${escapeHtml(opt.label)}</span>
         </label>
       `).join("")}
-      <label class="check-chip" style="justify-content:flex-start; margin-bottom:6px;">
+      <label class="check-chip">
         <input type="checkbox" id="leitsymptomatikCustomToggle" ${customText ? "checked" : ""}>
-        <span>Patientenindividuell (Freitext)</span>
+        <span>Patient individuell</span>
       </label>
     </div>
     <div id="leitsymptomatikCustomWrap" style="display:${customText ? "block" : "none"};">
@@ -1577,11 +1567,15 @@ function collectRezeptFormPayload() {
     hausbesuch: document.getElementById("hausbesuch").value,
     arztStempel: document.getElementById("arztStempel").value,
     arztUnterschrift: document.getElementById("arztUnterschrift").value,
+    privat: document.getElementById("privat")?.checked || false,
     items: collectRezeptItemsFromForm()
   };
 }
 
 function renderRezeptPruefungPanel(validation) {
+  if (validation.privat) {
+    return `<p class="pill-green">🔒 Privatrezept — keine Kassenregeln, keine Pflichtfeld-Prüfung nötig.</p>`;
+  }
   if (validation.ok) {
     return `<p class="pill-green">✓ Alle Pflichtfelder vollständig · Fristen ok</p>`;
   }
@@ -1606,7 +1600,7 @@ function bindRezeptPruefungLive(panelId) {
     panel.innerHTML = renderRezeptPruefungPanel(validation);
   };
 
-  ["arzt", "ausstell", "bg", "dt", "dringend", "icd10", "icd10b", "leitsymptomatik", "hausbesuch", "arztStempel", "arztUnterschrift"]
+  ["arzt", "ausstell", "bg", "dt", "dringend", "icd10", "icd10b", "leitsymptomatik", "hausbesuch", "arztStempel", "arztUnterschrift", "privat"]
     .forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.addEventListener("input", refresh);
@@ -1865,7 +1859,7 @@ function flattenNachbestellLines(letterData = {}) {
       (patient.rezepte || []).map((rezept) => ({
         patient: patient.patientName || "",
         geb: patient.geb || "",
-        heim: group.type === "hausbesuch" ? "Hausbesuch" : (group.title || ""),
+        heim: group.title || "",
         text: rezept.text || ""
       }))
     )
@@ -2187,12 +2181,38 @@ function renderDoctorReportPrintHtml({ settings = {}, patient = {}, rezept = {},
 
 async function wipeAllAppData() {
   clearRuntimeSession();
+  // Eine offene IndexedDB-Verbindung (siehe storage/indexeddb.js) muss vor
+  // dem Löschen der Datenbank geschlossen werden, sonst blockiert der
+  // Browser deleteDatabase() dauerhaft, obwohl kein anderer Tab offen ist.
+  await closeDatabase();
   await new Promise((resolve, reject) => {
     const req = indexedDB.deleteDatabase("fast_doku_db");
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error || new Error("Datenbank konnte nicht gelöscht werden."));
     req.onblocked = () => reject(new Error("Datenbank-Löschung ist blockiert. Bitte andere Tabs schließen."));
   });
+}
+
+async function performFullReset(msgEl) {
+  try {
+    await wipeAllAppData();
+    window.location.reload();
+  } catch (err) {
+    console.error(err);
+    if (msgEl) msgEl.textContent = err?.message || "Daten konnten nicht gelöscht werden.";
+  }
+}
+
+// Eigenständiges Passwort (unabhängig von der Geräte-PIN) für den
+// "PIN vergessen? App zurücksetzen"-Weg auf dem Sperrbildschirm - falls ein
+// Therapeut die PIN nicht mehr kennt, kommt er sonst gar nicht mehr in die
+// App hinein (siehe showLoginView). Auf Nutzerwunsch fest auf "1989" gesetzt.
+// Wie beim festen Praxispasswort bewusst nicht im Klartext im Quellcode,
+// nur als Schutz gegen zufälliges Auffinden (z.B. GitHub-Volltextsuche) -
+// keine echte Sicherheitsmaßnahme.
+const FORGOT_PIN_RESET_PASSWORD_ENCODED = "MTk4OQ==";
+function getForgotPinResetPassword() {
+  return atob(FORGOT_PIN_RESET_PASSWORD_ENCODED);
 }
 
 export function bindLockButton(onLock) {
@@ -2205,8 +2225,19 @@ export function hideLockButton() {
   lockBtn.onclick = null;
 }
 
+// Das Praxispasswort ist auf Nutzerwunsch fest vorgegeben (gilt für die
+// App-Verschlüsselung UND alle Backups) statt frei wählbar zu sein. Bewusst
+// nicht als Klartext-String im Quellcode, damit es bei einem oberflächlichen
+// Blick in den Code (z.B. per GitHub-Suche) nicht sofort auffällt - das ist
+// keine echte Sicherheitsmaßnahme (jeder mit Lesezugriff auf den Code kann
+// es trivial decodieren), nur ein Schutz gegen zufälliges Auffinden.
+const FIXED_PRACTICE_PASSWORD_ENCODED = "RmFsbG1hbm4uU3Ryb2Js";
+function getFixedPracticePassword() {
+  return atob(FIXED_PRACTICE_PASSWORD_ENCODED);
+}
+
 function requestPracticePasswordForBackup() {
-  return window.prompt("Bitte Praxispasswort eingeben:", "") || "";
+  return getFixedPracticePassword();
 }
 
 async function runBackupImportFlow({ file, messageElement, successMessage, beforeReload }) {
@@ -2255,12 +2286,11 @@ export function showSetupView({ onSuccess }) {
       <label for="therapistName">Therapeutenname</label>
       <input id="therapistName" type="text" autocomplete="off">
 
-      <label for="practiceAddress">Praxisadresse</label>
-      <textarea id="practiceAddress" rows="3" autocomplete="off">Münchener Str. 155
-85051 Ingolstadt</textarea>
+      <label>Praxisadresse</label>
+      <p class="muted" style="white-space:pre-line; border:1px solid var(--border); border-radius:10px; padding:10px 12px; margin-top:4px;">${escapeHtml(PRACTICE_ADDRESS)}</p>
 
-      <label for="practicePhone">Telefon</label>
-      <input id="practicePhone" type="tel" inputmode="numeric" autocomplete="off">
+      <label>Telefon</label>
+      <p class="muted" style="border:1px solid var(--border); border-radius:10px; padding:10px 12px; margin-top:4px;">${escapeHtml(PRACTICE_PHONE)}</p>
 
       <label for="therapistFax">Faxnummer</label>
       <input id="therapistFax" type="tel" inputmode="numeric" autocomplete="off">
@@ -2278,9 +2308,6 @@ export function showSetupView({ onSuccess }) {
       <label for="stundenStartsaldo">Startsaldo Stundenkonto</label>
       <input id="stundenStartsaldo" type="text" inputmode="numeric" autocomplete="off" placeholder="z. B. +40:00 oder -12:30">
       <p class="muted">Plus-/Minusstunden vor App-Einführung. Wird zum Stundenkonto addiert.</p>
-
-      <label for="practicePassword">Praxispasswort</label>
-      <input id="practicePassword" type="password" autocomplete="new-password">
 
       <label for="workflowPin">PIN (mindestens 6 Zeichen)</label>
       <input id="workflowPin" type="password" inputmode="numeric" autocomplete="new-password">
@@ -2318,15 +2345,15 @@ export function showSetupView({ onSuccess }) {
 
   document.getElementById("saveSetupBtn").onclick = async () => {
     const therapistName = document.getElementById("therapistName").value.trim();
-    const practiceAddress = document.getElementById("practiceAddress").value.trim();
-    const practicePhone = document.getElementById("practicePhone").value.trim();
+    const practiceAddress = PRACTICE_ADDRESS;
+    const practicePhone = PRACTICE_PHONE;
     const therapistFax = document.getElementById("therapistFax").value.trim();
     const workDays = WORK_DAY_OPTIONS.filter((day) => document.getElementById(`setupWorkDay-${day}`)?.checked);
     const weeklyHours = normalizeWeeklyHoursInput(document.getElementById("weeklyHours").value);
     const fastStartDatumInput = document.getElementById("fastStartDatum").value.trim();
     const fastStartDatum = fastStartDatumInput ? parseDeDate(fastStartDatumInput) : "";
     const stundenStartsaldoMinuten = parseStundenStartsaldoInput(document.getElementById("stundenStartsaldo").value);
-    const password = document.getElementById("practicePassword").value;
+    const password = getFixedPracticePassword();
     const pin = document.getElementById("workflowPin").value;
     const pinRepeat = document.getElementById("workflowPinRepeat").value;
     const msg = document.getElementById("setupMessage");
@@ -2346,11 +2373,6 @@ export function showSetupView({ onSuccess }) {
 
     if (stundenStartsaldoMinuten === null) {
       msg.textContent = "Der Startsaldo muss im Format +HH:MM oder -HH:MM eingegeben werden, z. B. +40:00.";
-      return;
-    }
-
-    if (!password || password.length < 8) {
-      msg.textContent = "Das Praxispasswort muss mindestens 8 Zeichen haben.";
       return;
     }
 
@@ -2415,6 +2437,17 @@ export function showLoginView({ onSuccess }) {
 
       <div id="loginMessage" class="${remainingMs > 0 ? "error" : ""}">
         ${remainingMs > 0 ? `Sperre aktiv. Noch ${Math.ceil(remainingMs / 1000)} Sekunden.` : ""}
+      </div>
+    </div>
+
+    <div class="card">
+      <button id="forgotPinBtn" class="secondary">PIN vergessen? App zurücksetzen</button>
+      <div id="forgotPinWrap" style="display:none; margin-top:12px;">
+        <p class="muted">Löscht alle auf diesem Gerät gespeicherten Praxisdaten unwiderruflich (bereits heruntergeladene Backup-Dateien auf Ihrem Computer sind davon nicht betroffen). Nur verwenden, wenn die PIN nicht mehr bekannt ist.</p>
+        <label for="resetPasswordInput">Zurücksetzen-Passwort</label>
+        <input id="resetPasswordInput" type="password" autocomplete="off">
+        <button id="confirmForgotPinResetBtn" class="danger" style="margin-top:10px;">Alles löschen und neu starten</button>
+        <div id="forgotPinResetMsg" class="error"></div>
       </div>
     </div>
   `);
@@ -2484,51 +2517,34 @@ export function showLoginView({ onSuccess }) {
       msg.textContent = "Login fehlgeschlagen.";
     }
   };
+
+  document.getElementById("forgotPinBtn").onclick = () => {
+    const wrap = document.getElementById("forgotPinWrap");
+    wrap.style.display = wrap.style.display === "none" ? "block" : "none";
+  };
+
+  document.getElementById("confirmForgotPinResetBtn").onclick = async () => {
+    const resetMsg = document.getElementById("forgotPinResetMsg");
+    resetMsg.textContent = "";
+
+    const enteredPassword = document.getElementById("resetPasswordInput").value;
+    if (enteredPassword !== getForgotPinResetPassword()) {
+      resetMsg.textContent = "Falsches Passwort.";
+      return;
+    }
+
+    const confirmed = window.confirm("Wirklich ALLE auf diesem Gerät gespeicherten Praxisdaten unwiderruflich löschen? Dieser Vorgang kann nicht rückgängig gemacht werden.");
+    if (!confirmed) return;
+
+    await performFullReset(resetMsg);
+  };
 }
 
 // Angepasst wegen Samsungs "Nicht genutzte Apps schlafen legen"-Funktion,
 // die bei manchen Geräten bereits nach 3-4 Tagen Nichtnutzung greifen kann
 // und dabei den App-Speicher (inkl. IndexedDB) zurücksetzen kann. Häufigere
 // Erinnerungen sollen das Risiko eines folgenlosen Datenverlusts reduzieren.
-const BACKUP_WARNING_DAYS = 5;
-const BACKUP_NOTICE_DAYS = 3;
-
-function getBackupWarning(lastBackupAt) {
-  if (!lastBackupAt) {
-    return {
-      level: "error",
-      text: "⚠️ Noch kein Backup erstellt. Bitte jetzt unter Einstellungen ein Backup exportieren."
-    };
-  }
-
-  const lastBackupDate = new Date(lastBackupAt);
-  if (Number.isNaN(lastBackupDate.getTime())) {
-    return null;
-  }
-
-  const daysSince = Math.floor((Date.now() - lastBackupDate.getTime()) / (1000 * 60 * 60 * 24));
-
-  if (daysSince >= BACKUP_WARNING_DAYS) {
-    return {
-      level: "error",
-      text: `⚠️ Letztes Backup vor ${daysSince} Tagen. Bitte zeitnah ein neues Backup exportieren.`
-    };
-  }
-
-  if (daysSince >= BACKUP_NOTICE_DAYS) {
-    return {
-      level: "warning",
-      text: `Letztes Backup vor ${daysSince} Tagen.`
-    };
-  }
-
-  return null;
-}
-
-function renderDashboardHeaderCard({ therapistName, lastBackupAt = "" }) {
-  const backupWarning = getBackupWarning(lastBackupAt);
-  const warningColor = backupWarning?.level === "error" ? "#b91c1c" : "#92400e";
-
+function renderDashboardHeaderCard({ therapistName }) {
   return `
     <div class="card">
       <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
@@ -2539,7 +2555,6 @@ function renderDashboardHeaderCard({ therapistName, lastBackupAt = "" }) {
         </div>
         <button id="openSettingsBtn" class="secondary" title="Einstellungen bearbeiten" aria-label="Einstellungen bearbeiten" style="width:auto; margin-top:0; padding:10px 12px; min-width:48px; font-size:20px; line-height:1;">⚙️</button>
       </div>
-      ${backupWarning ? `<p style="color:${warningColor}; font-weight:600; margin-top:10px; margin-bottom:0;">${escapeHtml(backupWarning.text)}</p>` : ""}
     </div>
   `;
 }
@@ -2562,11 +2577,11 @@ export function showSettingsView({ onLock }) {
       <label for="settingsTherapistName">Therapeutenname</label>
       <input id="settingsTherapistName" type="text" autocomplete="off" value="${escapeHtml(settings.therapistName || "")}">
 
-      <label for="settingsPracticeAddress">Praxisadresse</label>
-      <textarea id="settingsPracticeAddress" rows="3" autocomplete="off">${escapeHtml(settings.practiceAddress || "")}</textarea>
+      <label>Praxisadresse</label>
+      <p class="muted" style="white-space:pre-line; border:1px solid var(--border); border-radius:10px; padding:10px 12px; margin-top:4px;">${escapeHtml(PRACTICE_ADDRESS)}</p>
 
-      <label for="settingsPracticePhone">Telefon</label>
-      <input id="settingsPracticePhone" type="tel" inputmode="numeric" autocomplete="off" value="${escapeHtml(settings.practicePhone || "")}">
+      <label>Telefon</label>
+      <p class="muted" style="border:1px solid var(--border); border-radius:10px; padding:10px 12px; margin-top:4px;">${escapeHtml(PRACTICE_PHONE)}</p>
 
       <label for="settingsTherapistFax">Faxnummer</label>
       <input id="settingsTherapistFax" type="tel" inputmode="numeric" autocomplete="off" value="${escapeHtml(settings.therapistFax || "")}">
@@ -2623,8 +2638,8 @@ export function showSettingsView({ onLock }) {
 
   document.getElementById("saveSettingsBtn").onclick = async () => {
     const therapistName = document.getElementById("settingsTherapistName").value.trim();
-    const practiceAddress = document.getElementById("settingsPracticeAddress").value.trim();
-    const practicePhone = document.getElementById("settingsPracticePhone").value.trim();
+    const practiceAddress = PRACTICE_ADDRESS;
+    const practicePhone = PRACTICE_PHONE;
     const therapistFax = document.getElementById("settingsTherapistFax").value.trim();
     const workDays = WORK_DAY_OPTIONS.filter((day) => document.getElementById(`settingsWorkDay-${day}`)?.checked);
     const weeklyHours = normalizeWeeklyHoursInput(document.getElementById("settingsWeeklyHours").value);
@@ -2746,13 +2761,19 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
   const therapistName = runtimeData?.settings?.therapistName || "—";
   const lastBackupAt = runtimeData?.ui?.lastBackupAt || "";
   const todayDate = formatCurrentDateShort();
-  const totalTrackedMinutes = getTotalTrackedMinutes(runtimeData, todayDate);
   const dashboardTodayPatients = getDashboardTodayPatients(runtimeData, todayDate);
+  // Bewusst aus derselben Liste wie "Patienten heute" berechnet (statt der
+  // früheren getTotalTrackedMinutes(), die zusätzlich nach dem
+  // Stundenkonto-Startdatum gefiltert hat) - das führte dazu, dass "Stunden
+  // heute" 0:00 zeigte, obwohl "Patienten heute" bereits Einträge für den
+  // Tag auflistete: der Stundenkonto-Cutoff gehört zur Saldo-Berechnung,
+  // nicht zu einer reinen Tagesübersicht der tatsächlich erfassten Zeit.
+  const totalTrackedMinutes = dashboardTodayPatients.reduce((s, r) => s + r.totalMinutes, 0);
   const zuzahlungErinnerungen = getFaelligeZuzahlungErinnerungen(runtimeData);
   const assessmentErinnerungen = getFaelligeAssessmentErinnerungen(runtimeData);
 
   render(`
-    ${renderDashboardHeaderCard({ therapistName, lastBackupAt })}
+    ${renderDashboardHeaderCard({ therapistName })}
 
     ${zuzahlungErinnerungen.length > 0 ? `
       <div class="card" style="background:#fffbeb; border-color:#f59e0b;">
@@ -3004,13 +3025,7 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
     const confirmed = window.confirm("Wirklich alle Daten löschen? Dieser Vorgang kann nicht rückgängig gemacht werden.");
     if (!confirmed) return;
 
-    try {
-      await wipeAllAppData();
-      window.location.reload();
-    } catch (err) {
-      console.error(err);
-      msg.textContent = err?.message || "Daten konnten nicht gelöscht werden.";
-    }
+    await performFullReset(msg);
   };
 
   document.querySelectorAll(".klaereZuzahlungBtn").forEach((btn) => {
@@ -3390,7 +3405,6 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
               <div class="accordion-body">
                 <div style="margin-bottom:10px;">
                   ${patient.befreit ? `<span class="pill">Befreit</span>` : ""}
-                  ${patient.hb ? `<span class="pill">HB</span>` : ""}
                   ${patient.verstorben ? `<span class="pill-red">Verstorben</span>` : ""}
                 </div>
 
@@ -3442,7 +3456,6 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
                   <div class="compact-card" style="margin-bottom:10px;">
                     <label for="quickDocDate-${patient.patientId}">Behandlungsdatum</label>
                     <input id="quickDocDate-${patient.patientId}" class="quickDocDateInput" type="text" value="${escapeHtml(formatCurrentDateShort())}" placeholder="TT.MM.JJJJ" inputmode="numeric">
-                    <div class="compact-meta" style="margin-top:6px;">Dieses Datum gilt für die SchnellDoku und die automatische Zeitbuchung.</div>
                   </div>
                   ${quickDocRezepte.length === 0 ? `<p class="muted">Keine Rezepte für SchnellDoku vorhanden.</p>` : quickDocRezepte.length === 1 ? `
                     <div class="compact-card" style="margin-bottom:10px;">
@@ -3485,7 +3498,6 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
                   <input id="edit-birthDate-${patient.patientId}" type="text" value="${escapeHtml(patient.birthDate || "")}" inputmode="numeric" placeholder="TT.MM.JJJJ">
 
                   <div class="checkbox-row">
-                    <label class="check-chip"><input id="edit-hb-${patient.patientId}" type="checkbox" ${patient.hb ? "checked" : ""}> <span>Hausbesuch</span></label>
                     <label class="check-chip"><input id="edit-verstorben-${patient.patientId}" type="checkbox" ${patient.verstorben ? "checked" : ""}> <span>Verstorben</span></label>
                   </div>
 
@@ -3633,7 +3645,6 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
           firstName: document.getElementById(`edit-firstName-${patientId}`).value.trim(),
           lastName: document.getElementById(`edit-lastName-${patientId}`).value.trim(),
           birthDate: document.getElementById(`edit-birthDate-${patientId}`).value.trim(),
-          hb: document.getElementById(`edit-hb-${patientId}`).checked,
           verstorben: document.getElementById(`edit-verstorben-${patientId}`).checked
         });
 
@@ -4007,10 +4018,6 @@ export function showCreatePatientRezeptView({ onLock, homeId, searchText = "" })
 
         <label for="birthDate">Geburtsdatum</label>
         <input id="birthDate" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric" value="">
-
-        <div class="checkbox-row">
-          <label class="check-chip"><input id="hb" type="checkbox"> <span>Hausbesuch</span></label>
-        </div>
       </div>
 
       <div class="card">
@@ -4038,6 +4045,9 @@ export function showCreatePatientRezeptView({ onLock, homeId, searchText = "" })
         ${renderRezeptItemsEditor([])}
 
         <h3 style="margin-top:20px;">Rezeptprüfung</h3>
+        <div class="checkbox-row">
+          <label class="check-chip"><input id="privat" type="checkbox"> <span>🔒 Privat (keine Prüfung nötig)</span></label>
+        </div>
         <div class="checkbox-row">
           <label class="check-chip"><input id="bg" type="checkbox"> <span>BG</span></label>
           <label class="check-chip"><input id="dt" type="checkbox"> <span>Doppeltermin</span></label>
@@ -4087,7 +4097,6 @@ export function showCreatePatientRezeptView({ onLock, homeId, searchText = "" })
       const lastName = document.getElementById("lastName").value.trim();
       const anrede = document.getElementById("anrede").value;
       const birthDate = document.getElementById("birthDate").value.trim();
-      const hb = document.getElementById("hb").checked;
 
       if (!firstName && !lastName) {
         msg.textContent = "Bitte mindestens einen Namen für den Patienten eingeben.";
@@ -4106,8 +4115,7 @@ export function showCreatePatientRezeptView({ onLock, homeId, searchText = "" })
           lastName,
           anrede,
           birthDate,
-          befreit: false,
-          hb
+          befreit: false
         });
         createRezept(homeId, newPatientId, rezeptPayload);
         const arztAdresse = collectArztAdresseFromForm();
@@ -4329,7 +4337,7 @@ export function showAssessmentAbfrageView({ onLock, homeId, patientId, searchTex
       </div>
     `);
 
-    document.getElementById("assessmentJetztBtn").onclick = () => stepEbene0();
+    document.getElementById("assessmentJetztBtn").onclick = () => stepBereichAuswahl();
     document.getElementById("assessmentSpaeterBtn").onclick = () => renderSpaeter();
     document.getElementById("assessmentAbbrechenBtn").onclick = () => weiter();
     if (hasExisting) {
@@ -4381,6 +4389,14 @@ export function showAssessmentAbfrageView({ onLock, homeId, patientId, searchTex
     schwerst: { mrc: { gruppen: {}, spastik: "" }, kontrakturen: { vorhanden: false, liste: [] }, dekubitusrisiko: "", romPassiv: [], schmerzBeiBewegung: false, spastikWiderstand: false }
   };
   let reviewBackStep = null;
+  // Auf Nutzerwunsch: statt immer die komplette Ebene-0/Barthel/Schmerz/TUG-
+  // Vorlaufstrecke zu durchlaufen, kann bei bereits bekannter Diagnose auch
+  // direkt in einen Bereich (orthopädisch/neurologisch/schwerstbetroffen)
+  // gesprungen werden - siehe stepBereichAuswahl(). Dieses Flag merkt sich,
+  // ob dieser Direktweg genutzt wurde, damit "Zurück" aus dem gewählten
+  // Bereich wieder zur Bereichsauswahl statt zum (dann leeren) Weichenscreen
+  // führt.
+  let usedBranchShortcut = false;
 
   function wizardCard(title, bodyHtml, infoKey = null) {
     const info = infoKey ? AssessmentInfo.TEST_INFO[infoKey] : null;
@@ -4411,6 +4427,37 @@ export function showAssessmentAbfrageView({ onLock, homeId, patientId, searchTex
         ${bodyHtml}
       </div>
     `);
+  }
+
+  // Direkteinstieg: statt immer Ebene 0/Barthel/Schmerz/TUG zu durchlaufen,
+  // kann bei bereits bekannter Diagnose auch sofort in einen Bereich
+  // gesprungen werden (auf Nutzerwunsch ergänzt).
+  function stepBereichAuswahl() {
+    wizardCard("Wie möchten Sie starten?", `
+      <button type="button" id="stepFullFlowBtn" style="margin-bottom:16px;">Vollständige Erfassung (empfohlen)</button>
+      <p class="muted" style="margin-top:0;">Oder bei bereits bekannter Diagnose direkt in einen Bereich springen:</p>
+      <div class="list-stack">
+        ${Assessment.WEICHEN_OPTIONEN.map((opt) => `
+          <button type="button" class="secondary bereichDirektBtn" data-val="${opt.val}" style="text-align:left;">${escapeHtml(opt.label)}</button>
+        `).join("")}
+      </div>
+      <button id="wizardBack" class="secondary" style="margin-top:16px;">Zurück</button>
+    `);
+
+    document.getElementById("wizardBack").onclick = () => renderFrage();
+    document.getElementById("stepFullFlowBtn").onclick = () => {
+      usedBranchShortcut = false;
+      stepEbene0();
+    };
+    document.querySelectorAll(".bereichDirektBtn").forEach((btn) => {
+      btn.onclick = () => {
+        usedBranchShortcut = true;
+        wizard.weiche = btn.dataset.val;
+        if (wizard.weiche === "neurologisch") stepBbs7();
+        else if (wizard.weiche === "orthopaedisch") stepSppb();
+        else stepMrcSchwerst();
+      };
+    });
   }
 
   function stepEbene0() {
@@ -4635,7 +4682,7 @@ export function showAssessmentAbfrageView({ onLock, homeId, patientId, searchTex
       });
     });
 
-    document.getElementById("wizardBack").onclick = () => stepWeichenscreen();
+    document.getElementById("wizardBack").onclick = () => (usedBranchShortcut ? stepBereichAuswahl() : stepWeichenscreen());
     document.getElementById("wizardNext").onclick = () => {
       const msg = document.getElementById("wizardMsg");
       const result = {};
@@ -4782,7 +4829,7 @@ export function showAssessmentAbfrageView({ onLock, homeId, patientId, searchTex
     `, "sppb");
     bindCheckChipToggles(app);
 
-    document.getElementById("wizardBack").onclick = () => stepWeichenscreen();
+    document.getElementById("wizardBack").onclick = () => (usedBranchShortcut ? stepBereichAuswahl() : stepWeichenscreen());
     document.getElementById("wizardNext").onclick = () => {
       wizard.ortho.sppb = {
         balance: {
@@ -4911,7 +4958,7 @@ export function showAssessmentAbfrageView({ onLock, homeId, patientId, searchTex
     `, "mrc");
     bindCheckChipToggles(app);
 
-    document.getElementById("wizardBack").onclick = () => (wizard.tug.nichtDurchfuehrbar ? stepTug() : stepWeichenscreen());
+    document.getElementById("wizardBack").onclick = () => (usedBranchShortcut ? stepBereichAuswahl() : (wizard.tug.nichtDurchfuehrbar ? stepTug() : stepWeichenscreen()));
     document.getElementById("wizardNext").onclick = () => {
       const gruppen = {};
       Assessment.MRC_GRUPPEN.forEach((g) => {
@@ -5148,6 +5195,21 @@ export function showPatientDetailView({ onLock, homeId, patientId }) {
   const rezepte = rezepteSorted.filter((rezept) => rezept.abgegeben !== true);
   const abgegebeneRezepte = rezepteSorted.filter((rezept) => rezept.abgegeben === true);
 
+  // Doku-Übernahme: da sich die Therapie oft wiederholt, soll ein bereits
+  // geschriebener SchnellDoku-Text mit einem Klick auch für einen späteren
+  // Tag übernommen werden können, statt ihn jedes Mal neu zu tippen - flacht
+  // dafür die Dokumentationseinträge aller Rezepte des Patienten zu einer
+  // chronologischen Liste ab (neuester zuerst).
+  const todayDe = formatCurrentDateShort();
+  const allDokuEntries = (patient.rezepte || []).flatMap((rezept) =>
+    (rezept.entries || []).map((entry) => ({
+      ...entry,
+      rezeptId: rezept.rezeptId,
+      rezeptLabel: rezeptSummary(rezept),
+      rezeptAbgegeben: rezept.abgegeben === true
+    }))
+  ).sort((a, b) => compareDeDates(b.date, a.date) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+
   render(`
     <div class="card">
       <h2>${escapeHtml(formatPatientName(patient) || "Patient")}</h2>
@@ -5188,6 +5250,30 @@ export function showPatientDetailView({ onLock, homeId, patientId }) {
         }).join("")}
       </div>
     </div>
+
+    <details class="accordion" style="margin-top:12px;">
+      <summary>
+        <span>Doku</span>
+        <span class="muted">${allDokuEntries.length}</span>
+      </summary>
+      <div class="accordion-body">
+        ${allDokuEntries.length === 0 ? `<p class="muted">Noch keine Dokumentationseinträge vorhanden.</p>` : `
+          <div class="list-stack">
+            ${allDokuEntries.map((entry) => `
+              <div class="compact-card" style="margin:0;">
+                <div style="font-weight:700; margin-bottom:4px;">${escapeHtml(entry.date || "—")}</div>
+                <div class="compact-meta" style="margin-bottom:8px;">${escapeHtml(entry.rezeptLabel || "—")}${entry.rezeptAbgegeben ? " · abgegeben" : ""}</div>
+                <div style="white-space:pre-wrap;">${escapeHtml(entry.text || "—")}</div>
+                ${entry.date === todayDe || entry.rezeptAbgegeben
+                  ? `<div class="compact-meta" style="margin-top:10px;">${entry.date === todayDe ? "Bereits von heute." : "Rezept ist abgegeben."}</div>`
+                  : `<button class="dokuUebernehmenBtn secondary" data-rezept-id="${escapeHtml(entry.rezeptId)}" data-entry-id="${escapeHtml(entry.entryId)}" style="margin-top:10px; width:100%;">Für heute übernehmen</button>`
+                }
+              </div>
+            `).join("")}
+          </div>
+        `}
+      </div>
+    </details>
 
     <details class="accordion" style="margin-top:12px;">
       <summary>
@@ -5247,7 +5333,6 @@ export function showPatientDetailView({ onLock, homeId, patientId }) {
         <p><strong>Vorname:</strong> ${escapeHtml(patient.firstName || "—")}</p>
         <p><strong>Geburtsdatum:</strong> ${escapeHtml(patient.birthDate || "—")}</p>
         <p><strong>Befreit:</strong> ${patient.befreit ? "Ja" : "Nein"}</p>
-        <p><strong>Hausbesuch:</strong> ${patient.hb ? "Ja" : "Nein"}</p>
         <p><strong>Verstorben:</strong> ${patient.verstorben ? "Ja" : "Nein"}</p>
         <button id="deletePatientBtn" class="danger" style="margin-top:16px; width:100%;">Patient löschen</button>
       </div>
@@ -5296,6 +5381,22 @@ export function showPatientDetailView({ onLock, homeId, patientId }) {
         patientId,
         rezeptId: btn.dataset.rezeptId
       });
+    };
+  });
+
+  document.querySelectorAll(".dokuUebernehmenBtn").forEach((btn) => {
+    btn.onclick = async () => {
+      const sourceEntry = allDokuEntries.find((e) => e.entryId === btn.dataset.entryId && e.rezeptId === btn.dataset.rezeptId);
+      if (!sourceEntry) return;
+
+      try {
+        createRezeptEntry(homeId, patientId, btn.dataset.rezeptId, { date: formatCurrentDateShort(), text: sourceEntry.text });
+        await queuePersistRuntimeData();
+        showPatientDetailView({ onLock, homeId, patientId });
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || "Eintrag konnte nicht übernommen werden.");
+      }
     };
   });
 }
@@ -5631,6 +5732,9 @@ export function showCreateRezeptView({ onLock, homeId, patientId, prefill = null
 
       <h3 style="margin-top:20px;">Rezeptprüfung</h3>
       <div class="checkbox-row">
+        <label class="check-chip"><input id="privat" type="checkbox"> <span>🔒 Privat (keine Prüfung nötig)</span></label>
+      </div>
+      <div class="checkbox-row">
         <label class="check-chip"><input id="bg" type="checkbox"> <span>BG</span></label>
         <label class="check-chip"><input id="dt" type="checkbox"> <span>Doppeltermin</span></label>
         <label class="check-chip"><input id="dringend" type="checkbox"> <span>Dringender Bedarf</span></label>
@@ -5746,6 +5850,9 @@ export function showEditRezeptView({ onLock, homeId, patientId, rezeptId }) {
       ${renderRezeptItemsEditor(items)}
 
       <h3 style="margin-top:20px;">Rezeptprüfung</h3>
+      <div class="checkbox-row">
+        <label class="check-chip"><input id="privat" type="checkbox" ${rezept.privat ? "checked" : ""}> <span>🔒 Privat (keine Prüfung nötig)</span></label>
+      </div>
       <div class="checkbox-row">
         <label class="check-chip"><input id="bg" type="checkbox" ${rezept.bg ? "checked" : ""}> <span>BG</span></label>
         <label class="check-chip"><input id="dt" type="checkbox" ${rezept.dt ? "checked" : ""}> <span>Doppeltermin</span></label>
@@ -5880,6 +5987,7 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId }) {
         <p><strong>ICD-10 Code:</strong> ${escapeHtml(rezept.icd10 || "—")}</p>
         ${rezept.icd10b ? `<p><strong>2. ICD-10 Code:</strong> ${escapeHtml(rezept.icd10b)}</p>` : ""}
         <p><strong>Leitsymptomatik:</strong> ${escapeHtml(rezept.leitsymptomatik || "—")}</p>
+        <p><strong>Privat:</strong> ${rezept.privat ? "Ja" : "Nein"}</p>
         <p><strong>Hausbesuch:</strong> ${rezept.hausbesuch === "ja" ? "Ja" : rezept.hausbesuch === "nein" ? "Nein" : "—"}</p>
         <p><strong>Arzt-Stempel vorhanden:</strong> ${rezept.arztStempel === "ja" ? "Ja" : rezept.arztStempel === "nein" ? "Nein" : "—"}</p>
         <p><strong>Arzt-Unterschrift vorhanden:</strong> ${rezept.arztUnterschrift === "ja" ? "Ja" : rezept.arztUnterschrift === "nein" ? "Nein" : "—"}</p>
@@ -5895,13 +6003,15 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId }) {
     <details class="accordion">
       <summary>
         <span>Fristenhinweis</span>
-        <span class="muted">${escapeHtml(frist.statusText || "—")}</span>
+        <span class="muted">${rezept.privat ? "Privatrezept — keine Frist" : escapeHtml(frist.statusText || "—")}</span>
       </summary>
       <div class="accordion-body">
-        <p><strong>Status:</strong> ${escapeHtml(frist.statusText || "—")}</p>
-        <p><strong>Hinweis:</strong> ${escapeHtml(frist.detailsText || "—")}</p>
-        <p><strong>Spätester Beginn:</strong> ${escapeHtml(frist.latestStartText || "—")}</p>
-        <p><strong>Gültig bis:</strong> ${escapeHtml(frist.validUntilText || "—")}</p>
+        ${rezept.privat ? `<p class="muted">Für Privatrezepte gelten keine Kassenfristen.</p>` : `
+          <p><strong>Status:</strong> ${escapeHtml(frist.statusText || "—")}</p>
+          <p><strong>Hinweis:</strong> ${escapeHtml(frist.detailsText || "—")}</p>
+          <p><strong>Spätester Beginn:</strong> ${escapeHtml(frist.latestStartText || "—")}</p>
+          <p><strong>Gültig bis:</strong> ${escapeHtml(frist.validUntilText || "—")}</p>
+        `}
       </div>
     </details>
 
@@ -8271,7 +8381,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     `);
 
     document.querySelectorAll(".zeit-patient-btn").forEach(el => {
-      el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId: el.dataset.patientId });
+      el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId: el.dataset.patientId, scrollTo: window.scrollY });
     });
     document.getElementById("zeitBackHomeBtn").onclick = () => {
       setCurrentView("zeiterfassung", { selectedHomeId: null, selectedPatientId: null, selectedRezeptId: null });
@@ -8303,14 +8413,14 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       `);
       document.getElementById("zeitBackPatientBtn").onclick = () => {
         setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId: null, selectedRezeptId: null });
-        showZeiterfassungView({ onLock, selectedHomeId });
+        showZeiterfassungView({ onLock, selectedHomeId, scrollTo });
       };
       return;
     }
 
     if (aktiveRezepte.length === 1) {
       setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId, selectedRezeptId: null });
-      return showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: aktiveRezepte[0].rezeptId });
+      return showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: aktiveRezepte[0].rezeptId, scrollTo });
     }
 
     // Mehrere Rezepte – Auswahl anzeigen
@@ -8339,11 +8449,11 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     `);
 
     document.querySelectorAll(".zeit-rezept-btn").forEach(el => {
-      el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: el.dataset.rezeptId });
+      el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId, selectedRezeptId: el.dataset.rezeptId, scrollTo });
     });
     document.getElementById("zeitBackPatientBtn").onclick = () => {
       setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId: null, selectedRezeptId: null });
-      showZeiterfassungView({ onLock, selectedHomeId });
+      showZeiterfassungView({ onLock, selectedHomeId, scrollTo });
     };
     return;
   }
@@ -8384,16 +8494,13 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   bindCheckChipToggles(app);
 
   const backBtn = document.getElementById("zeitBackRezeptBtn");
-  backBtn.addEventListener("touchend", (e) => {
+  const goBackToPatientList = (e) => {
     e.preventDefault();
     setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId: null, selectedRezeptId: null });
-    showZeiterfassungView({ onLock, selectedHomeId });
-  });
-  backBtn.addEventListener("click", (e) => {
-    e.preventDefault();
-    setCurrentView("zeiterfassung", { selectedHomeId, selectedPatientId: null, selectedRezeptId: null });
-    showZeiterfassungView({ onLock, selectedHomeId });
-  });
+    showZeiterfassungView({ onLock, selectedHomeId, scrollTo });
+  };
+  backBtn.addEventListener("touchend", goBackToPatientList);
+  backBtn.addEventListener("click", goBackToPatientList);
 
   document.getElementById("zeitBuchenBtn").onclick = async () => {
     const notiz = document.getElementById("zeitNotizInput").value.trim();
@@ -8427,14 +8534,13 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
           createdAt: new Date().toISOString()
         });
       });
-      const scrollPosition = window.scrollY;
       await queuePersistRuntimeData();
 
       showZeiterfassungView({
         onLock,
         selectedHomeId,
         successMsg: `✓ ${minutes} Min für ${patientName} am ${normalizedDatum} gebucht`,
-        scrollTo: scrollPosition
+        scrollTo
       });
     } catch (err) {
       msg.textContent = "Fehler beim Speichern: " + err.message;

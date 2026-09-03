@@ -699,7 +699,6 @@ export function createPatient(homeId, payload) {
       anrede: ["frau", "herr"].includes(payload.anrede) ? payload.anrede : "",
       birthDate: (payload.birthDate || "").trim(),
       befreit: !!payload.befreit,
-      hb: !!payload.hb,
       verstorben: !!payload.verstorben,
       zuzahlungsstatus: "",
       zuzahlungsstatusSetAt: "",
@@ -729,7 +728,6 @@ export function updatePatient(homeId, patientId, payload) {
     if (payload.befreit !== undefined) {
       patient.befreit = !!payload.befreit;
     }
-    patient.hb = !!payload.hb;
     patient.verstorben = !!payload.verstorben;
   });
 }
@@ -1058,6 +1056,7 @@ export function createRezept(homeId, patientId, payload) {
       hausbesuch: payload.hausbesuch === "ja" || payload.hausbesuch === "nein" ? payload.hausbesuch : "",
       arztStempel: payload.arztStempel === "ja" || payload.arztStempel === "nein" ? payload.arztStempel : "",
       arztUnterschrift: payload.arztUnterschrift === "ja" || payload.arztUnterschrift === "nein" ? payload.arztUnterschrift : "",
+      privat: payload.privat === true,
       abgegeben: false,
       items,
       entries: [],
@@ -1107,6 +1106,7 @@ export function updateRezept(homeId, patientId, rezeptId, payload) {
     rezept.hausbesuch = payload.hausbesuch === "ja" || payload.hausbesuch === "nein" ? payload.hausbesuch : "";
     rezept.arztStempel = payload.arztStempel === "ja" || payload.arztStempel === "nein" ? payload.arztStempel : "";
     rezept.arztUnterschrift = payload.arztUnterschrift === "ja" || payload.arztUnterschrift === "nein" ? payload.arztUnterschrift : "";
+    rezept.privat = payload.privat === true;
     rezept.abgegeben = rezept.abgegeben === true;
     rezept.items = items;
 
@@ -1433,7 +1433,6 @@ export function buildNachbestellLetterData(data, rows) {
   }
 
   const doctor = doctors[0];
-  const settings = data?.settings && typeof data.settings === 'object' ? data.settings : {};
   const groups = new Map();
   let rezeptCount = 0;
   let patientCount = 0;
@@ -1442,17 +1441,14 @@ export function buildNachbestellLetterData(data, rows) {
     const { home, patient, rezept } = findNachbestellContext(data, row);
     if (!home || !patient || !rezept) return;
 
-    const isHausbesuch = !!patient.hb;
-    const groupKey = isHausbesuch ? '__hausbesuch__' : `home:${home.homeId}`;
+    const groupKey = `home:${home.homeId}`;
 
     if (!groups.has(groupKey)) {
       groups.set(groupKey, {
         groupKey,
-        type: isHausbesuch ? 'hausbesuch' : 'heim',
-        title: isHausbesuch ? 'Hausbesuch' : String(home.name || '').trim(),
-        address: isHausbesuch
-          ? String(settings.practiceAddress || '').trim()
-          : String(home.adresse || '').trim(),
+        type: 'heim',
+        title: String(home.name || '').trim(),
+        address: String(home.adresse || '').trim(),
         patients: new Map()
       });
     }
