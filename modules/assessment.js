@@ -10,12 +10,14 @@ export const REMINDER_INTERVAL_DAYS = { 3: 90, 6: 180 };
 export const GEDAECHTNIS_OPTIONEN = [
   { val: "unauffaellig", label: "unauffällig" },
   { val: "kurzzeit", label: "Kurzzeitgedächtnis betroffen" },
-  { val: "langzeit", label: "Langzeitgedächtnis betroffen" }
+  { val: "langzeit", label: "Langzeitgedächtnis betroffen" },
+  { val: "nicht_beurteilbar", label: "nicht beurteilbar" }
 ];
 export const KOMMUNIKATION_OPTIONEN = [
   { val: "verbal", label: "verbal unauffällig" },
   { val: "verbal_eingeschraenkt", label: "verbal eingeschränkt" },
-  { val: "nonverbal", label: "nonverbal" }
+  { val: "nonverbal", label: "nonverbal" },
+  { val: "nicht_moeglich", label: "Kommunikation nicht möglich" }
 ];
 export const KOOPERATION_OPTIONEN = [
   { val: "gut", label: "gut" },
@@ -24,7 +26,7 @@ export const KOOPERATION_OPTIONEN = [
 ];
 
 export function determineSchmerzTyp(ebene0) {
-  return ebene0?.kommunikation === "nonverbal" ? "besd" : "nrs";
+  return ["nonverbal", "nicht_moeglich"].includes(ebene0?.kommunikation) ? "besd" : "nrs";
 }
 
 // ============================================================
