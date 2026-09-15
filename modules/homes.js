@@ -21,7 +21,7 @@ function normalizeLeistungName(value) {
 function getSingleLeistungMinutes(type) {
   const key = normalizeLeistungName(type);
 
-  if (["KG", "MT", "KG-ZNS", "KGZNS", "MLD30", "BLANKO"].includes(key)) return 20;
+  if (["KG", "MT", "KG-ZNS", "KGZNS", "KG-ATEMTHERAPIE", "KGAT", "MLD30", "BLANKO"].includes(key)) return 20;
   if (key === "MLD45") return 40;
   if (key === "MLD60") return 60;
 
@@ -615,13 +615,14 @@ export function finalizeKilometerExport(fromDate, toDate, { snapshotHtml = '', n
 }
 
 
-export function createHome({ name, adresse, verwaltungsEmail = "" }) {
+export function createHome({ name, adresse, verwaltungsEmail = "", hbPauschale = "HB" }) {
   mutateRuntimeData((data) => {
     data.homes.push({
       homeId: generateId("home"),
       name: name.trim(),
       adresse: adresse.trim(),
       verwaltungsEmail: String(verwaltungsEmail || "").trim(),
+      hbPauschale: ["HB", "HBHP"].includes(hbPauschale) ? hbPauschale : "HB",
       patients: []
     });
   });
@@ -632,6 +633,14 @@ export function updateHomeAddress(homeId, adresse) {
     const home = getHomeById(data, homeId);
     if (!home) throw new Error("Heim nicht gefunden");
     home.adresse = String(adresse || "").trim();
+  });
+}
+
+export function updateHomePauschale(homeId, hbPauschale) {
+  mutateRuntimeData((data) => {
+    const home = getHomeById(data, homeId);
+    if (!home) throw new Error("Heim nicht gefunden");
+    home.hbPauschale = ["HB", "HBHP"].includes(hbPauschale) ? hbPauschale : "HB";
   });
 }
 
@@ -1391,6 +1400,7 @@ export function buildAbgabeRows(data) {
         rows.push({
           rowId: `${home.homeId}_${patient.patientId}_${rezept.rezeptId}`,
           heim: home.name || "",
+          hbPauschale: home.hbPauschale || "HB",
           patient: `${patient.lastName || ""}, ${patient.firstName || ""}`.replace(/^,\s*/, "").trim(),
           patientFirstName: patient.firstName || "",
           patientLastName: patient.lastName || "",
@@ -1704,6 +1714,7 @@ export function buildAbgabeTree(data) {
       homes.push({
         homeId: home.homeId,
         homeName: home.name || "",
+        hbPauschale: home.hbPauschale || "HB",
         patients: patients.sort((a, b) => {
           const last = String(a.patientLastName || "").localeCompare(String(b.patientLastName || ""), "de");
           if (last !== 0) return last;

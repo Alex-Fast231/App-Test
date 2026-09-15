@@ -138,6 +138,10 @@ function isPatientDeceased(patient) {
   return !!patient?.verstorben;
 }
 
+function hatAktivesRezept(patient) {
+  return (patient.rezepte || []).some((r) => r.abgegeben !== true);
+}
+
 function sortRezepteForDisplay(rezepte) {
   return [...(rezepte || [])].sort((a, b) => compareDeDates(b?.ausstell, a?.ausstell));
 }
@@ -946,7 +950,7 @@ function formatCurrentDateShort(date = new Date()) {
   });
 }
 
-const REZEPT_ITEM_OPTIONS = ["KG", "MT", "KG-ZNS", "MLD30", "MLD45", "MLD60", "Blanko"];
+const REZEPT_ITEM_OPTIONS = ["KG", "MT", "KG-ZNS", "KG-Atemtherapie", "MLD30", "MLD45", "MLD60", "Blanko"];
 
 function getKnownDoctorNames(data) {
   return getDoctorList(data).filter(Boolean);
@@ -3156,6 +3160,18 @@ export function showHomesView({ onLock, searchText = "" }) {
               <label for="edit-home-email-${home.homeId}">Verwaltungs-E-Mail</label>
               <input id="edit-home-email-${home.homeId}" type="email" value="${escapeHtml(home.verwaltungsEmail || "")}" placeholder="verwaltung@einrichtung.de">
 
+              <label>HB-Pauschale</label>
+              <div class="row" style="gap:12px;">
+                <label class="check-chip" style="justify-content:flex-start;">
+                  <input type="radio" name="homePauschale-${home.homeId}" value="HB" ${(home.hbPauschale || "HB") === "HB" ? "checked" : ""}>
+                  <span>HB</span>
+                </label>
+                <label class="check-chip" style="justify-content:flex-start;">
+                  <input type="radio" name="homePauschale-${home.homeId}" value="HBHP" ${home.hbPauschale === "HBHP" ? "checked" : ""}>
+                  <span>HBHP</span>
+                </label>
+              </div>
+
               <div class="row">
                 <button class="saveHomeEditBtn" data-home-id="${home.homeId}">Speichern</button>
                 <button class="deleteHomeBtn danger" data-home-id="${home.homeId}">Heim löschen</button>
@@ -3181,12 +3197,26 @@ export function showHomesView({ onLock, searchText = "" }) {
           <label for="homeVerwaltungsEmail">Verwaltungs-E-Mail</label>
           <input id="homeVerwaltungsEmail" type="email" placeholder="verwaltung@einrichtung.de">
 
+          <label>HB-Pauschale</label>
+          <div class="row" style="gap:12px;">
+            <label class="check-chip" style="justify-content:flex-start;">
+              <input type="radio" name="homePauschale" value="HB" checked>
+              <span>HB</span>
+            </label>
+            <label class="check-chip" style="justify-content:flex-start;">
+              <input type="radio" name="homePauschale" value="HBHP">
+              <span>HBHP</span>
+            </label>
+          </div>
+
           <button id="createHomeBtn">Heim speichern</button>
           <div id="homeMsg"></div>
         </div>
       </details>
     </div>
   `);
+
+  bindCheckChipToggles(app);
 
   document.getElementById("backDashboardBtn").onclick = () => {
     showDashboardView({ onLock });
@@ -3196,6 +3226,7 @@ export function showHomesView({ onLock, searchText = "" }) {
     const name = document.getElementById("homeName").value.trim();
     const adresse = document.getElementById("homeAddress").value.trim();
     const verwaltungsEmail = document.getElementById("homeVerwaltungsEmail").value.trim();
+    const hbPauschale = document.querySelector('input[name="homePauschale"]:checked')?.value || "HB";
     const msg = document.getElementById("homeMsg");
 
     msg.className = "error";
@@ -3207,7 +3238,7 @@ export function showHomesView({ onLock, searchText = "" }) {
     }
 
     try {
-      createHome({ name, adresse, verwaltungsEmail });
+      createHome({ name, adresse, verwaltungsEmail, hbPauschale });
       await queuePersistRuntimeData();
       showHomesView({ onLock });
     } catch (err) {
@@ -3242,6 +3273,7 @@ export function showHomesView({ onLock, searchText = "" }) {
       const name = document.getElementById(`edit-home-name-${homeId}`).value.trim();
       const adresse = document.getElementById(`edit-home-address-${homeId}`).value.trim();
       const verwaltungsEmail = document.getElementById(`edit-home-email-${homeId}`).value.trim();
+      const hbPauschale = document.querySelector(`input[name="homePauschale-${homeId}"]:checked`)?.value || "HB";
       const msg = document.getElementById(`home-edit-msg-${homeId}`);
 
       msg.className = "error";
@@ -3259,6 +3291,7 @@ export function showHomesView({ onLock, searchText = "" }) {
           home.name = name;
           home.adresse = adresse;
           home.verwaltungsEmail = verwaltungsEmail;
+          home.hbPauschale = ["HB", "HBHP"].includes(hbPauschale) ? hbPauschale : "HB";
         });
         await queuePersistRuntimeData();
         showHomesView({ onLock });
@@ -6417,12 +6450,11 @@ function renderAbgabeSheetHtml(rows, options = {}) {
       // Befreit (orange) hat Vorrang vor Doppeltermin (blau).
       const highlightStyle = row.befreit
         ? "border:2px solid #c2410c; border-radius:8px; padding:8px 10px;"
-        : row.dt
-          ? "border:2px solid #1d4ed8; border-radius:8px; padding:8px 10px;"
-          : "";
+        : "";
       return `
       <div class="row" style="${highlightStyle}">
-        <strong>${escapeHtml(row.patient || "—")}</strong> · ${escapeHtml(row.heim || "—")}<br>
+        <strong>${escapeHtml(row.patient || "—")}</strong> · ${escapeHtml(row.heim || "—")}
+        <span class="pill" style="font-size:11px; margin-left:4px;">${escapeHtml(row.hbPauschale || "HB")}</span><br>
         <span class="muted">Arzt: ${escapeHtml(row.arzt || "—")}</span><br>
         <span class="muted">Ausstellung: ${escapeHtml(row.ausstell || "—")}</span><br>
         <span class="muted">Leistung: ${escapeHtml(row.leistung || "—")} ${escapeHtml(row.anzahl || "")}</span><br>
@@ -6438,8 +6470,15 @@ export function showAbgabeView({ onLock, searchText = "", selectedIds = [] }) {
   setCurrentView("abgabe", { searchText, selectedIds });
 
   const data = getRuntimeData();
+  const nurAktive = !!data?.settings?.nurAktiveRezepte;
   const tree = buildAbgabeTree(data);
-  const allRows = buildAbgabeRows(data);
+  const allRows = nurAktive
+    ? buildAbgabeRows(data).filter(row => {
+        const home = (data.homes || []).find(h => h.homeId === row.homeId);
+        const patient = (home?.patients || []).find(p => p.patientId === row.patientId);
+        return hatAktivesRezept(patient);
+      })
+    : buildAbgabeRows(data);
   const filteredRows = filterAbgabeRows(allRows, searchText);
   const allowedIds = new Set(filteredRows.map((row) => row.rowId));
   const selected = new Set(selectedIds);
@@ -6466,6 +6505,11 @@ export function showAbgabeView({ onLock, searchText = "", selectedIds = [] }) {
 
     <div class="card">
       <h3>Abgabe-Auswahl</h3>
+
+      <label class="check-chip" style="justify-content:flex-start; margin-bottom:12px;">
+        <input type="checkbox" id="abgabeFilterAktiv" ${nurAktive ? "checked" : ""}>
+        <span>Nur Patienten mit aktivem Rezept</span>
+      </label>
 
       ${tree.length === 0 ? `<p class="muted">Noch keine Rezeptdaten vorhanden.</p>` : `
         <div class="list-stack">
@@ -6512,7 +6556,7 @@ export function showAbgabeView({ onLock, searchText = "", selectedIds = [] }) {
             return `
               <details class="accordion">
                 <summary>
-                  <span>${escapeHtml(home.homeName || "Heim")}</span>
+                  <span>${escapeHtml(home.homeName || "Heim")} <span class="pill" style="font-size:11px;">${escapeHtml(home.hbPauschale || "HB")}</span></span>
                   <span class="muted">${home.patients.length} Patient(en)</span>
                 </summary>
                 <div class="accordion-body">
@@ -6558,8 +6602,15 @@ export function showAbgabeView({ onLock, searchText = "", selectedIds = [] }) {
   `);
 
   bindSelectableCardChecks(app);
+  bindCheckChipToggles(app);
 
   document.getElementById("backDashboardBtn").onclick = () => showDashboardView({ onLock });
+
+  document.getElementById("abgabeFilterAktiv")?.addEventListener("change", async (e) => {
+    mutateRuntimeData(d => { d.settings.nurAktiveRezepte = e.target.checked; });
+    await queuePersistRuntimeData();
+    showAbgabeView({ onLock, searchText, selectedIds });
+  });
 
   document.getElementById("runAbgabeSearchBtn").onclick = () => {
     const value = document.getElementById("abgabeSearch").value;
@@ -8535,6 +8586,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   const runtimeData = getRuntimeData();
   const homes = sortHomesAlpha(runtimeData?.homes || []);
   const today = formatCurrentDateShort();
+  const nurAktive = !!runtimeData?.settings?.nurAktiveRezepte;
 
   // Schritt 1: Einrichtung wählen
   if (!selectedHomeId) {
@@ -8542,12 +8594,18 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
     render(`
       <div class="card">
         <h2>Zeiterfassung</h2>
+        <div style="margin-bottom:12px;">
+          <label class="check-chip" style="justify-content:flex-start;">
+            <input type="checkbox" id="zeitFilterAktiv" ${nurAktive ? "checked" : ""}>
+            <span>Nur Patienten mit aktivem Rezept</span>
+          </label>
+        </div>
         <p class="muted">Einrichtung auswählen:</p>
         <div class="list-stack">
           ${homes.length === 0
             ? `<p class="muted">Keine Einrichtungen vorhanden.</p>`
             : homes.map(home => {
-                const aktivePatients = (home.patients || []).filter(p => !isPatientDeceased(p));
+                const aktivePatients = (home.patients || []).filter(p => !isPatientDeceased(p) && (!nurAktive || hatAktivesRezept(p)));
                 return `
                   <div class="compact-card selectable-card zeit-home-btn" data-home-id="${escapeHtml(home.homeId || '')}">
                     <div style="font-weight:700; font-size:16px;">${escapeHtml(home.name || '—')}</div>
@@ -8562,6 +8620,13 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       </div>
     `);
 
+    bindCheckChipToggles(app);
+
+    document.getElementById("zeitFilterAktiv")?.addEventListener("change", async (e) => {
+      mutateRuntimeData(d => { d.settings.nurAktiveRezepte = e.target.checked; });
+      await queuePersistRuntimeData();
+      showZeiterfassungView({ onLock });
+    });
     document.querySelectorAll(".zeit-home-btn").forEach(el => {
       el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId: el.dataset.homeId });
     });
@@ -8577,7 +8642,7 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
   if (!home) return showZeiterfassungView({ onLock });
 
   const aktivePatients = sortPatientsAlpha(
-    (home.patients || []).filter(p => !isPatientDeceased(p))
+    (home.patients || []).filter(p => !isPatientDeceased(p) && (!nurAktive || hatAktivesRezept(p)))
   );
 
   if (!selectedPatientId) {
@@ -8586,6 +8651,12 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       <div class="card">
         <h2>Zeiterfassung</h2>
         <div style="font-weight:700; margin-bottom:12px;">${escapeHtml(home.name || '—')}</div>
+        <div style="margin-bottom:12px;">
+          <label class="check-chip" style="justify-content:flex-start;">
+            <input type="checkbox" id="zeitFilterAktiv" ${nurAktive ? "checked" : ""}>
+            <span>Nur Patienten mit aktivem Rezept</span>
+          </label>
+        </div>
         <p class="muted">Patient auswählen:</p>
         <div class="list-stack">
           ${aktivePatients.length === 0
@@ -8606,6 +8677,13 @@ export function showZeiterfassungView({ onLock, selectedHomeId = null, selectedP
       </div>
     `);
 
+    bindCheckChipToggles(app);
+
+    document.getElementById("zeitFilterAktiv")?.addEventListener("change", async (e) => {
+      mutateRuntimeData(d => { d.settings.nurAktiveRezepte = e.target.checked; });
+      await queuePersistRuntimeData();
+      showZeiterfassungView({ onLock, selectedHomeId });
+    });
     document.querySelectorAll(".zeit-patient-btn").forEach(el => {
       el.onclick = () => showZeiterfassungView({ onLock, selectedHomeId, selectedPatientId: el.dataset.patientId, scrollTo: window.scrollY });
     });
@@ -8784,7 +8862,7 @@ function getAutomaticTreatmentMinutesForZeit(rezept) {
   }
   function singleMin(type) {
     const k = norm(type);
-    if (["KG", "MT", "KG-ZNS", "KGZNS", "MLD30", "BLANKO"].includes(k)) return 20;
+    if (["KG", "MT", "KG-ZNS", "KGZNS", "KG-ATEMTHERAPIE", "KGAT", "MLD30", "BLANKO"].includes(k)) return 20;
     if (k === "MLD45") return 40;
     if (k === "MLD60") return 60;
     return 0;

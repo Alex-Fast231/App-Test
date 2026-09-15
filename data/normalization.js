@@ -424,6 +424,7 @@ function normalizeHome(home) {
     name: ensureString(source.name),
     adresse: ensureString(source.adresse || source.address),
     verwaltungsEmail: ensureString(source.verwaltungsEmail),
+    hbPauschale: ["HB", "HBHP"].includes(source.hbPauschale) ? source.hbPauschale : "HB",
     patients: ensureArray(source.patients).map(normalizePatient)
   };
 }
@@ -649,6 +650,7 @@ export function finalizeAppStructure(data) {
         email: ensureString(settings.buero?.email)
       },
       assessmentIntervalMonths: [3, 6].includes(Number(settings.assessmentIntervalMonths)) ? Number(settings.assessmentIntervalMonths) : 3,
+      nurAktiveRezepte: ensureBoolean(settings.nurAktiveRezepte, false),
       createdAt: ensureIsoString(settings.createdAt, now),
       updatedAt: ensureIsoString(settings.updatedAt, now) || now
     },
