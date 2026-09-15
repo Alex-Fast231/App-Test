@@ -69,6 +69,21 @@ function sanitizeFilenamePart(str) {
     .replace(/^-|-$/g, "");
 }
 
+// Fügt einer bereits geöffneten ZipWriter-Instanz die für den Viewer nötige
+// appData.json hinzu (vollständiger, unverschlüsselter JSON-Stand aller
+// App-Daten, nur per ZIP-PIN geschützt, ohne den Praxispasswort-Krypto-Stack
+// der App zu benötigen) - gemeinsam genutzt von buildBackupZip() hier und
+// vom manuellen "Backup exportieren" in modules/backup.js, damit beide
+// Export-Wege dieselbe, vom Viewer lesbare Datei mit derselben PIN erzeugen.
+export async function addViewerAppDataEntry(writer, normalizedRuntimeData) {
+  const zipLib = requireZip();
+  await writer.add(
+    "appData.json",
+    new zipLib.TextReader(JSON.stringify(normalizedRuntimeData, null, 2)),
+    { password: BACKUP_ZIP_PIN, encryptionStrength: 3 }
+  );
+}
+
 // Baut die Viewer-Backup-ZIP: enthält eine einzige Datei (appData.json)
 // mit dem vollständigen, unverschlüsselten JSON-Stand aller App-Daten -
 // anders als das manuelle Backup in den Einstellungen keine appData.enc/
@@ -79,11 +94,7 @@ export async function buildBackupZip(runtimeData) {
   const normalized = finalizeAppStructure(runtimeData);
   const zipLib = requireZip();
   const writer = new zipLib.ZipWriter(new zipLib.BlobWriter("application/zip"));
-  await writer.add(
-    "appData.json",
-    new zipLib.TextReader(JSON.stringify(normalized, null, 2)),
-    { password: BACKUP_ZIP_PIN, encryptionStrength: 3 }
-  );
+  await addViewerAppDataEntry(writer, normalized);
 
   const blob = await writer.close();
   const stamp = normalized.exportTimestamp.replace(/[:T]/g, "-").slice(0, 16);
