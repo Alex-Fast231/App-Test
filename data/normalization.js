@@ -1,5 +1,5 @@
 import { createEmptyAppData, APP_SCHEMA_VERSION, APP_VERSION, APP_MODULE, PRACTICE_ADDRESS } from "./schema.js";
-import { formatDeDate, parseDeDate } from "../core/date-utils.js";
+import { formatDeDate, parseDeDate, compareDeDates } from "../core/date-utils.js";
 import { generateId, getRezeptAusstellungsdatum } from "../core/utils.js";
 
 function ensureString(value, fallback = "") {
@@ -77,6 +77,14 @@ function normalizeEntry(entry) {
   };
 }
 
+// Defensiv beim Laden: SchnellDoku-Einträge chronologisch sortieren
+// (frühestes Datum zuerst), unabhängig von der ursprünglichen
+// Eingabe-Reihenfolge - z.B. für Backups/Importe, die vor der Sortierung
+// beim Speichern (siehe modules/homes.js: createRezeptEntry) entstanden sind.
+function sortEntriesChronologically(entries) {
+  return [...entries].sort((a, b) => compareDeDates(a?.date, b?.date));
+}
+
 function normalizeItem(item) {
   const source = item && typeof item === "object" ? item : {};
   const type = ensureString(source.type).trim();
@@ -127,7 +135,7 @@ return {
   privat: ensureBoolean(source.privat, false),
   abgegeben: ensureBoolean(source.abgegeben, false),
   items,
-  entries: ensureArray(source.entries).map(normalizeEntry),
+  entries: sortEntriesChronologically(ensureArray(source.entries).map(normalizeEntry)),
   zeitMeta: source.zeitMeta && typeof source.zeitMeta === "object"
     ? source.zeitMeta
     : {
@@ -395,6 +403,7 @@ function normalizePatient(patient) {
     birthDate: ensureDeDateString(source.birthDate),
     befreit: ensureBoolean(source.befreit, false),
     verstorben: ensureBoolean(source.verstorben, false),
+    ausgeschieden: ensureBoolean(source.ausgeschieden, false),
     zuzahlungsstatus: ensureZuzahlungsstatus(source.zuzahlungsstatus),
     zuzahlungsstatusSetAt: ensureIsoString(source.zuzahlungsstatusSetAt),
     zuzahlungReminderAt: ensureIsoString(source.zuzahlungReminderAt),
@@ -640,6 +649,8 @@ export function finalizeAppStructure(data) {
       weeklyHours: ensureWeeklyHours(settings.weeklyHours),
       fastStartDatum: ensureString(settings.fastStartDatum),
       stundenStartsaldoMinuten: ensureIntegerNumber(settings.stundenStartsaldoMinuten, 0),
+      jahresurlaubTage: ensureIntegerNumber(settings.jahresurlaubTage, 0),
+      fastiEnabled: ensureBoolean(settings.fastiEnabled, true),
       zertifikate: {
         kgzns: ensureBoolean(settings.zertifikate?.kgzns, false),
         mt: ensureBoolean(settings.zertifikate?.mt, false),
@@ -690,7 +701,8 @@ export function finalizeAppStructure(data) {
 
     ui: {
       lastBackupAt: ensureIsoString(source.ui?.lastBackupAt),
-      lastAutoExportAt: ensureIsoString(source.ui?.lastAutoExportAt)
+      lastAutoExportAt: ensureIsoString(source.ui?.lastAutoExportAt),
+      lastFastiWeeklySummaryAt: ensureIsoString(source.ui?.lastFastiWeeklySummaryAt)
     }
   };
 

@@ -1,16 +1,20 @@
 import { openDatabase } from "../storage/indexeddb.js";
 import { hasSecuritySetup, loadCryptoMeta, loadSecurityState } from "../storage/secure-store.js";
-import { setCryptoMeta, setSecurityState, getRuntimeData } from "./app-core.js";
+import { setCryptoMeta, setSecurityState, getRuntimeData, queuePersistRuntimeData } from "./app-core.js";
 import { createAutoLockController } from "../security/lock.js";
 import { APP_VERSION } from "../data/schema.js";
 import { isBackupReminderDue } from "../modules/backupReminder.js";
+import { buildFastiNotices, markWeeklySummaryShown } from "../modules/fasti.js";
 import {
   showSetupView,
   showLoginView,
   showDashboardView,
   performLock,
   resumeCurrentView,
-  showBackupReminderModal
+  showBackupReminderModal,
+  showFastiNotices,
+  hideFastiWidget,
+  setFastiOnLock
 } from "../ui/views.js";
 
 let autoLockController = null;
@@ -74,6 +78,8 @@ function lockApp() {
     autoLockController.stop();
   }
 
+  hideFastiWidget();
+
   performLock({
     onLocked: async () => {
       const state = await loadSecurityState();
@@ -95,6 +101,37 @@ function handleUnlocked() {
   ensureAutoLock();
   resumeCurrentView({ onLock: lockApp });
   maybeShowBackupReminder();
+  initiateFasti();
+}
+
+// Läuft einmalig nach jedem Entsperren: berechnet die Hinweise aus allen 5
+// FaSti-Bereichen (siehe modules/fasti.js) und zeigt sie gebündelt im
+// Chat-Panel an. Die Montags-Zusammenfassung markiert sich dabei selbst als
+// "angezeigt" (data.ui.lastFastiWeeklySummaryAt), damit sie am selben Tag
+// nicht erneut erscheint.
+function initiateFasti() {
+  setFastiOnLock(lockApp);
+
+  const runtimeData = getRuntimeData();
+  if (!runtimeData) {
+    console.warn("FaSti: übersprungen, da beim Entsperren keine App-Daten im Speicher waren (runtimeData ist leer).");
+    return;
+  }
+
+  // Einstellungen -> "FaSti An/Aus" (Standard: an). Bei "aus" wird das
+  // Widget nicht einmal aufgebaut/angezeigt - nicht nur das Panel verborgen.
+  if (runtimeData.settings?.fastiEnabled === false) {
+    hideFastiWidget();
+    return;
+  }
+
+  const notices = buildFastiNotices(runtimeData);
+  if (notices.some((notice) => notice.markShownOnDisplay)) {
+    markWeeklySummaryShown();
+    queuePersistRuntimeData();
+  }
+
+  showFastiNotices(notices);
 }
 
 // Zeigt beim Entsperren eine Erinnerung an das Viewer-Backup, sobald das

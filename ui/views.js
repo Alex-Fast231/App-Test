@@ -55,7 +55,6 @@ import {
   deleteRezeptTimeEntry,
   getRezeptTimeEntries,
   getRezeptTimeSummary,
-  getRezeptEntryAutoMinutes,
   saveKilometerStartPoint,
   saveKnownKilometerRoute,
   getKilometerOverview,
@@ -100,6 +99,7 @@ import {
   markBackupReminderHandled,
   markBackupReminderPostponed
 } from "../modules/backupReminder.js";
+import { answerFastiChat, executeFastiAction, resumeFastiChoice, startNachbestellungVorschlag, buildFastiNotices } from "../modules/fasti.js";
 import { generateId, formatPatientName } from "../core/utils.js";
 import {
   normalizeDeDateInput,
@@ -1731,6 +1731,65 @@ export function showBackupReminderModal({ onDone } = {}) {
   };
 }
 
+// Ersetzt ein früheres window.prompt() für "Assessment verschieben" (Dashboard,
+// Bereich 3) - ein natives Browser-Prompt kann keine TT.MM.JJJJ-Auto-Formatierung
+// bekommen (bindDateAutoFormat setzt auf echte <input>-Events), deshalb ein
+// kleines eigenes Modal nach demselben Muster wie showBackupReminderModal().
+function showAssessmentVerschiebenModal({ homeId, patientId, onDone }) {
+  document.getElementById("assessmentVerschiebenOverlay")?.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "assessmentVerschiebenOverlay";
+  overlay.style.cssText = "position:fixed; inset:0; background:rgba(15,23,42,0.55); z-index:9998; display:flex; align-items:center; justify-content:center; padding:16px;";
+  overlay.innerHTML = `
+    <div class="card" style="max-width:380px; width:100%; margin:0;">
+      <h3>Assessment verschieben</h3>
+      <label for="assessmentVerschiebenDatum">Neues Datum</label>
+      <input id="assessmentVerschiebenDatum" type="text" inputmode="numeric" placeholder="TT.MM.JJJJ" autocomplete="off">
+      <div id="assessmentVerschiebenMsg" class="error" style="margin-top:8px;"></div>
+      <div class="row" style="margin-top:16px;">
+        <button id="assessmentVerschiebenSaveBtn" style="margin-top:0;">Speichern</button>
+        <button id="assessmentVerschiebenCancelBtn" class="secondary" style="margin-top:0;">Abbrechen</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const input = document.getElementById("assessmentVerschiebenDatum");
+  bindDateAutoFormat(input);
+  input.focus();
+
+  function close() {
+    overlay.remove();
+  }
+
+  document.getElementById("assessmentVerschiebenCancelBtn").onclick = close;
+
+  async function save() {
+    const msg = document.getElementById("assessmentVerschiebenMsg");
+    msg.textContent = "";
+    const parsed = parseDeDate(input.value.trim());
+    if (!parsed) {
+      msg.textContent = "Bitte ein gültiges Datum im Format TT.MM.JJJJ eingeben.";
+      return;
+    }
+    try {
+      scheduleAssessment(homeId, patientId, parsed);
+      await queuePersistRuntimeData();
+      close();
+      if (onDone) onDone();
+    } catch (err) {
+      console.error(err);
+      msg.textContent = err?.message || "Termin konnte nicht verschoben werden.";
+    }
+  }
+
+  document.getElementById("assessmentVerschiebenSaveBtn").onclick = save;
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") save();
+  });
+}
+
 function openHtmlDocument(title, bodyHtml, { autoPrint = false } = {}) {
   const win = window.open("", "_blank", "width=900,height=700");
   if (!win) {
@@ -2641,6 +2700,14 @@ export function showSettingsView({ onLock }) {
       <input id="settingsStundenStartsaldo" type="text" inputmode="numeric" autocomplete="off" value="${escapeHtml(getSignedMinutesLabel(getStundenStartsaldoMinutes(settings)).replace(' Stunden', ''))}" placeholder="z. B. +40:00 oder -12:30">
       <p class="muted">Plus-/Minusstunden vor App-Einführung. Wird zum Stundenkonto addiert.</p>
 
+      <label for="settingsJahresurlaubTage">Jahresurlaub (Tage)</label>
+      <input id="settingsJahresurlaubTage" type="text" inputmode="numeric" autocomplete="off" value="${escapeHtml(String(settings.jahresurlaubTage || 0))}" placeholder="z. B. 30">
+      <p class="muted">Wird für das Urlaubskonto von FaSti verwendet (Anspruch minus genommene Urlaubstage).</p>
+
+      <h3 style="margin-top:20px;">FaSti</h3>
+      <label class="check-chip"><input id="settingsFastiEnabled" type="checkbox" ${settings.fastiEnabled !== false ? "checked" : ""}> <span>FaSti aktiviert</span></label>
+      <p class="muted">Schaltet den FaSti-Assistenten (Button, Hinweise, Chat) komplett ein oder aus. Wirkt sofort nach dem Speichern, ohne erneutes Einloggen. Standardmäßig aktiviert.</p>
+
       <h3 style="margin-top:20px;">Zertifikate</h3>
       <p class="muted">Wird für die Rezeptoptimierung (Vorschläge nur für zertifizierte Heilmittel) verwendet.</p>
       <div class="checkbox-row">
@@ -2687,6 +2754,9 @@ export function showSettingsView({ onLock }) {
     const fastStartDatumInput = document.getElementById("settingsFastStartDatum").value.trim();
     const fastStartDatum = fastStartDatumInput ? parseDeDate(fastStartDatumInput) : "";
     const stundenStartsaldoMinuten = parseStundenStartsaldoInput(document.getElementById("settingsStundenStartsaldo").value);
+    const jahresurlaubTageInput = document.getElementById("settingsJahresurlaubTage").value.trim();
+    const jahresurlaubTage = jahresurlaubTageInput === "" ? 0 : Number(jahresurlaubTageInput);
+    const fastiEnabled = document.getElementById("settingsFastiEnabled").checked;
     const zertifikate = {
       mt: document.getElementById("zertMt").checked,
       mld: document.getElementById("zertMld").checked,
@@ -2714,6 +2784,11 @@ export function showSettingsView({ onLock }) {
       return;
     }
 
+    if (!Number.isFinite(jahresurlaubTage) || jahresurlaubTage < 0) {
+      msg.textContent = "Der Jahresurlaub muss als Zahl (Tage) eingegeben werden, z. B. 30.";
+      return;
+    }
+
     try {
       mutateRuntimeData((data) => {
         data.settings.therapistName = therapistName;
@@ -2724,6 +2799,8 @@ export function showSettingsView({ onLock }) {
         data.settings.weeklyHours = weeklyHours;
         data.settings.fastStartDatum = fastStartDatum;
         data.settings.stundenStartsaldoMinuten = stundenStartsaldoMinuten;
+        data.settings.jahresurlaubTage = jahresurlaubTage;
+        data.settings.fastiEnabled = fastiEnabled;
         data.settings.zertifikate = zertifikate;
         data.settings.buero = { email: bueroEmail };
         data.settings.assessmentIntervalMonths = assessmentIntervalMonths;
@@ -2731,6 +2808,16 @@ export function showSettingsView({ onLock }) {
       });
 
       await queuePersistRuntimeData();
+
+      // Sofort wirksam machen, ohne dass ein erneutes Ein-/Ausloggen nötig
+      // ist - "aus" blendet Button+Panel sofort aus, "an" baut sie (falls
+      // gerade deaktiviert) mit frisch berechneten Hinweisen wieder auf.
+      if (fastiEnabled) {
+        showFastiNotices(buildFastiNotices(getRuntimeData()));
+      } else {
+        hideFastiWidget();
+      }
+
       msg.className = "success";
       msg.textContent = "Einstellungen gespeichert.";
     } catch (err) {
@@ -3093,22 +3180,12 @@ export function showDashboardView({ onLock, keepOverviewOpen = false } = {}) {
   });
 
   document.querySelectorAll(".assessmentVerschiebenBtn").forEach((btn) => {
-    btn.onclick = async () => {
-      const neuesDatum = window.prompt("Assessment auf welches Datum verschieben? (TT.MM.JJJJ)", "");
-      if (neuesDatum === null) return;
-      const parsed = parseDeDate(neuesDatum);
-      if (!parsed) {
-        alert("Bitte ein gültiges Datum im Format TT.MM.JJJJ eingeben.");
-        return;
-      }
-      try {
-        scheduleAssessment(btn.dataset.homeId, btn.dataset.patientId, parsed);
-        await queuePersistRuntimeData();
-        showDashboardView({ onLock });
-      } catch (err) {
-        console.error(err);
-        alert(err?.message || "Termin konnte nicht verschoben werden.");
-      }
+    btn.onclick = () => {
+      showAssessmentVerschiebenModal({
+        homeId: btn.dataset.homeId,
+        patientId: btn.dataset.patientId,
+        onDone: () => showDashboardView({ onLock })
+      });
     };
   });
 
@@ -3480,6 +3557,7 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
                 <div style="margin-bottom:10px;">
                   ${patient.befreit ? `<span class="pill">Befreit</span>` : ""}
                   ${patient.verstorben ? `<span class="pill-red">Verstorben</span>` : ""}
+                  ${patient.ausgeschieden ? `<span class="pill-gray">Ausgeschieden</span>` : ""}
                 </div>
 
                 <div class="inline-action-stack" style="margin-bottom:10px;">
@@ -3573,7 +3651,9 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
 
                   <div class="checkbox-row">
                     <label class="check-chip"><input id="edit-verstorben-${patient.patientId}" type="checkbox" ${patient.verstorben ? "checked" : ""}> <span>Verstorben</span></label>
+                    <label class="check-chip"><input id="edit-ausgeschieden-${patient.patientId}" type="checkbox" ${patient.ausgeschieden ? "checked" : ""}> <span>Ausgeschieden</span></label>
                   </div>
+                  <p class="muted">"Ausgeschieden" löscht den Patienten nicht, gilt aber nicht mehr als aktiv - keine Nachbestellungs-, Zuzahlungs- oder Assessment-Erinnerungen mehr.</p>
 
                   <label for="edit-zuzahlungsstatus-${patient.patientId}">Zuzahlungsstatus</label>
                   ${renderZuzahlungsstatusSelect(`edit-zuzahlungsstatus-${patient.patientId}`, patient.zuzahlungsstatus || "")}
@@ -3719,7 +3799,8 @@ export function showHomeDetailView({ onLock, homeId, searchText = "" }) {
           firstName: document.getElementById(`edit-firstName-${patientId}`).value.trim(),
           lastName: document.getElementById(`edit-lastName-${patientId}`).value.trim(),
           birthDate: document.getElementById(`edit-birthDate-${patientId}`).value.trim(),
-          verstorben: document.getElementById(`edit-verstorben-${patientId}`).checked
+          verstorben: document.getElementById(`edit-verstorben-${patientId}`).checked,
+          ausgeschieden: document.getElementById(`edit-ausgeschieden-${patientId}`).checked
         });
 
         const currentPatient = getPatientById(getHomeById(getRuntimeData(), homeId), patientId);
@@ -5542,6 +5623,7 @@ export function showPatientDetailView({ onLock, homeId, patientId, returnTo = nu
         <p><strong>Geburtsdatum:</strong> ${escapeHtml(patient.birthDate || "—")}</p>
         <p><strong>Befreit:</strong> ${patient.befreit ? "Ja" : "Nein"}</p>
         <p><strong>Verstorben:</strong> ${patient.verstorben ? "Ja" : "Nein"}</p>
+        <p><strong>Ausgeschieden:</strong> ${patient.ausgeschieden ? "Ja" : "Nein"}</p>
         <button id="deletePatientBtn" class="danger" style="margin-top:16px; width:100%;">Patient löschen</button>
       </div>
     </details>
@@ -6242,7 +6324,6 @@ export function showRezeptDetailView({ onLock, homeId, patientId, rezeptId, retu
           <div class="card" style="margin-bottom:12px;padding:16px;">
             <p><strong>${escapeHtml(entry.date || "Ohne Datum")}</strong></p>
             <p>${escapeHtml(entry.text || "")}</p>
-            <p class="muted">Automatische Zeit: ${escapeHtml(formatMinutesLabel(getRezeptEntryAutoMinutes(rezept, entry)))}</p>
             <div class="row" style="margin-top:10px;">
               <button class="editEntryBtn secondary" data-entry-id="${entry.entryId}">Eintrag bearbeiten</button>
               <button class="deleteEntryBtn danger" data-entry-id="${entry.entryId}">Eintrag löschen</button>
@@ -8883,4 +8964,769 @@ function getAutomaticTreatmentMinutesForZeit(rezept) {
 
   if (rezept?.dt && !isFixedMLD) return firstMin * 2;
   return firstMin;
+}
+
+// ============================================================
+// FaSti - Widget, Chat-Panel, CSS-Animationen (siehe modules/fasti.js für
+// die eigentliche Analyse-/Intent-/Aktionslogik, die hier nur aufgerufen und
+// dargestellt wird). Button + Panel werden bewusst direkt an document.body
+// gehängt (nicht in #app), da render()/renderTherapistBody & Co. bei jedem
+// Ansichtswechsel #app.innerHTML komplett ersetzen - ein Element innerhalb
+// von #app würde also bei jeder Navigation verschwinden.
+// ============================================================
+let fastiChatHistory = [];
+let fastiPendingAction = null;
+let fastiPendingInput = null;
+let fastiCurrentNotices = [];
+let fastiAnimationTimer = null;
+let fastiOnLock = null;
+
+// Von core/boot.js einmalig nach dem Login gesetzt (lockApp-Referenz), damit
+// FaSti-Navigationsbefehle dieselben show*View()-Funktionen wie die normale
+// Menüführung aufrufen können - die brauchen alle onLock, das sonst nur
+// entlang der regulären View-Kette (resumeCurrentView usw.) weitergereicht
+// wird und FaSti als eigenständiges, an document.body gehängtes Widget
+// sonst nicht zur Verfügung stünde.
+export function setFastiOnLock(onLock) {
+  fastiOnLock = onLock;
+}
+
+const FASTI_SVG = `
+  <svg class="fasti-figure idle" viewBox="0 0 60 100" aria-hidden="true">
+    <path class="fasti-clip-body" d="M30 8
+      C43 8 51 17 51 29
+      L51 68
+      C51 82 40 90 29 90
+      C18 90 11 82 11 71
+      L11 33
+      C11 25 17 20 24 20
+      C31 20 36 25 36 33
+      L36 64" fill="none" stroke="#15803d" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+    <ellipse class="fasti-eye" cx="21" cy="17" rx="5.5" ry="7.5" fill="#fff" stroke="#0f172a" stroke-width="1.5"/>
+    <ellipse class="fasti-eye" cx="38" cy="17" rx="5.5" ry="7.5" fill="#fff" stroke="#0f172a" stroke-width="1.5"/>
+    <circle class="fasti-pupil" cx="22.5" cy="18" r="2.4" fill="#0f172a"/>
+    <circle class="fasti-pupil" cx="39.5" cy="18" r="2.4" fill="#0f172a"/>
+  </svg>
+`;
+
+function ensureFastiStyles() {
+  if (document.getElementById("fastiStyles")) return;
+  const style = document.createElement("style");
+  style.id = "fastiStyles";
+  style.textContent = `
+    :root{ --fasti-color:#15803d; }
+    .fasti-btn{
+      position:fixed; right:18px; bottom:calc(18px + env(safe-area-inset-bottom, 0px));
+      width:58px; height:58px; border-radius:50%; background:#fff;
+      border:2px solid var(--fasti-color); box-shadow:0 6px 18px rgba(15,23,42,0.28);
+      display:flex; align-items:center; justify-content:center; cursor:grab; z-index:9990;
+      touch-action:none; user-select:none;
+    }
+    .fasti-btn:active{ cursor:grabbing; }
+    .fasti-btn svg{ width:32px; height:52px; overflow:visible; }
+    .fasti-badge{
+      position:absolute; top:-4px; right:-4px; min-width:20px; height:20px; padding:0 5px;
+      border-radius:999px; background:#b91c1c; color:#fff; font-size:12px; font-weight:700;
+      display:flex; align-items:center; justify-content:center; line-height:1; box-shadow:0 1px 4px rgba(0,0,0,0.3);
+    }
+    .fasti-panel{
+      position:fixed; right:16px; bottom:calc(84px + env(safe-area-inset-bottom, 0px));
+      width:360px; max-width:calc(100vw - 32px); max-height:min(72vh, 640px);
+      background:#fff; border-radius:16px; border:1px solid #dbe3ee;
+      box-shadow:0 14px 44px rgba(15,23,42,0.32); z-index:9991;
+      display:flex; flex-direction:column; overflow:hidden;
+    }
+    .fasti-panel-header{
+      background:var(--fasti-color); color:#fff; padding:12px 14px; font-weight:700;
+      display:flex; justify-content:space-between; align-items:center; flex-shrink:0; gap:8px;
+    }
+    .fasti-header-actions{ display:flex; align-items:center; gap:8px; flex-shrink:0; }
+    .fasti-dismiss-all-btn{
+      background:rgba(255,255,255,0.16); border:1px solid rgba(255,255,255,0.55); color:#fff;
+      font-size:11px; font-weight:600; padding:5px 9px; border-radius:8px; cursor:pointer;
+      white-space:nowrap; width:auto; margin-top:0;
+    }
+    .fasti-close-btn{ background:transparent; border:none; color:#fff; font-size:18px; line-height:1; cursor:pointer; padding:2px 4px; width:auto; margin-top:0; }
+    .fasti-notices{ padding:10px 12px; border-bottom:1px solid #eee; height:220px; max-height:60vh; overflow-y:auto; flex-shrink:0; }
+    .fasti-notice{ border-radius:10px; padding:8px 10px; margin-bottom:8px; font-size:13px; line-height:1.4; }
+    .fasti-notice:last-child{ margin-bottom:0; }
+    .fasti-notice.rot{ background:#fee2e2; color:#991b1b; }
+    .fasti-notice.orange{ background:#ffedd5; color:#9a3412; }
+    .fasti-notice.gelb{ background:#fef9c3; color:#854d0e; }
+    .fasti-notice-actions{ margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; }
+    .fasti-notice-actions button{ font-size:12px; padding:5px 10px; margin-top:0; }
+    .fasti-notices-resizer{
+      height:12px; flex-shrink:0; background:#f8fafc; border-bottom:1px solid #eee;
+      cursor:row-resize; touch-action:none; position:relative;
+    }
+    .fasti-notices-resizer::after{
+      content:""; position:absolute; left:50%; top:50%; width:36px; height:4px;
+      transform:translate(-50%,-50%); border-radius:2px; background:#cbd5e1;
+    }
+    .fasti-chat-log{ flex:1; overflow-y:auto; padding:10px 12px; display:flex; flex-direction:column; gap:8px; min-height:70px; }
+    .fasti-msg{ max-width:88%; padding:8px 10px; border-radius:12px; font-size:13px; white-space:pre-line; line-height:1.4; }
+    .fasti-msg.user{ align-self:flex-end; background:var(--primary,#2563eb); color:#fff; }
+    .fasti-msg.fasti{ align-self:flex-start; background:#f1f5f9; color:#0f172a; }
+    .fasti-msg .fasti-notice-actions button{ margin-top:8px; }
+    .fasti-chat-input-row{
+      display:flex; gap:8px; padding:10px 12px; border-top:1px solid #eee; flex-shrink:0;
+      padding-bottom:calc(10px + env(safe-area-inset-bottom, 0px));
+    }
+    .fasti-chat-input-row input{ flex:1; min-width:0; padding:8px 10px; border-radius:10px; border:1px solid #dbe3ee; font-size:14px; }
+    /* Ohne explizites width/flex hier gewinnt die globale "button{ width:100% }"-Regel
+       (siehe index.html) gegen das Eingabefeld: der Button beansprucht als Flex-Item
+       ohne eigenes flex-basis seine volle width:100% als Basisgröße, wodurch für das
+       Eingabefeld (flex:1, flex-basis:0) kaum noch Platz übrig bleibt - es schrumpft
+       auf einen winzigen Kreis statt der erwarteten Zeile. */
+    .fasti-chat-input-row button{ flex:0 0 auto; width:auto; padding:8px 14px; margin-top:0; white-space:nowrap; }
+
+    /* [hidden] hat dieselbe CSS-Spezifität wie eine Klasse - ohne diese
+       Regel würde z.B. ".fasti-badge{ display:flex }" das hidden-Attribut
+       per Ladereihenfolge überstimmen und das Element trotz el.hidden=true
+       sichtbar lassen. */
+    .fasti-btn[hidden], .fasti-panel[hidden], .fasti-badge[hidden], .fasti-notices[hidden]{ display:none !important; }
+
+    @keyframes fastiIdleSway{ 0%,100%{ transform:rotate(-3deg); } 50%{ transform:rotate(3deg); } }
+    @keyframes fastiBlink{ 0%,90%,100%{ transform:scaleY(1); } 95%{ transform:scaleY(0.12); } }
+    @keyframes fastiAufwachen{ 0%,100%{ transform:rotate(-11deg); } 50%{ transform:rotate(11deg); } }
+    @keyframes fastiNicken{ 0%{ transform:rotate(0deg); } 30%{ transform:rotate(16deg); } 60%{ transform:rotate(-8deg); } 100%{ transform:rotate(0deg); } }
+    .fasti-figure{ transform-origin:50% 92%; }
+    .fasti-figure.idle{ animation:fastiIdleSway 3.2s ease-in-out infinite; }
+    .fasti-figure.idle .fasti-eye{ animation:fastiBlink 5s ease-in-out infinite; transform-origin:center; }
+    .fasti-figure.aufwachen{ animation:fastiAufwachen 0.45s ease-in-out 4; }
+    .fasti-figure.nicken{ animation:fastiNicken 0.6s ease-in-out 1; }
+  `;
+  document.head.appendChild(style);
+}
+
+function setFastiAnimation(state) {
+  const svg = document.querySelector("#fastiWidgetBtn .fasti-figure");
+  if (!svg) return;
+  svg.classList.remove("idle", "aufwachen", "nicken");
+  void svg.offsetWidth; // Reflow erzwingen, damit dieselbe Animation erneut von vorne startet
+  svg.classList.add(state);
+
+  if (fastiAnimationTimer) clearTimeout(fastiAnimationTimer);
+  if (state !== "idle") {
+    fastiAnimationTimer = setTimeout(() => setFastiAnimation("idle"), state === "nicken" ? 650 : 1900);
+  }
+}
+
+function setFastiPanelOpen(open) {
+  const panel = document.getElementById("fastiPanel");
+  if (!panel) return;
+  panel.hidden = !open;
+  if (open) document.getElementById("fastiChatInput")?.focus();
+}
+
+function toggleFastiPanel() {
+  const panel = document.getElementById("fastiPanel");
+  setFastiPanelOpen(panel ? panel.hidden : true);
+}
+
+function fastiActionLabel(action) {
+  if (action?.type === "nachbestellung_vorschlagen" || action?.type === "nachbestellzettel_erzeugen") return "Nachbestellzettel vorbereiten";
+  if (action?.type === "assessment_verschieben") return "Neues Datum setzen (+90 Tage)";
+  if (action?.type === "zeit_eintrag_anlegen") return "Zeit buchen";
+  if (action?.type === "doku_eintrag_anlegen") return "Eintragen";
+  if (action?.type === "abwesenheit_anlegen") return "Eintragen";
+  if (action?.type === "patient_ausgeschieden_setzen") return action.value ? "Als ausgeschieden markieren" : "Wieder aktivieren";
+  return "Bestätigen";
+}
+
+// Jede Meldung bekommt IMMER einen "Ignorieren"-Button, unabhängig davon, ob
+// zusätzlich eine Aktion (z.B. "Nachbestellzettel vorbereiten") möglich ist -
+// vorher fehlte der Dismiss-Button komplett bei Meldungen ohne Aktion (z.B.
+// die orangen Fristen-/Assessment-Hinweise), die dadurch nicht einzeln
+// ignorierbar waren.
+function renderFastiNoticeItem(notice) {
+  const confirmHtml = notice.action
+    ? `<button class="fastiNoticeConfirmBtn" data-notice-id="${escapeHtml(notice.id)}">${escapeHtml(fastiActionLabel(notice.action))}</button>`
+    : "";
+  return `
+    <div class="fasti-notice ${escapeHtml(notice.priority)}" data-notice-id="${escapeHtml(notice.id)}">
+      <div>${escapeHtml(notice.text)}</div>
+      <div class="fasti-notice-actions">
+        ${confirmHtml}
+        <button class="secondary fastiNoticeDismissBtn" data-notice-id="${escapeHtml(notice.id)}">Ignorieren</button>
+      </div>
+    </div>
+  `;
+}
+
+function bindFastiNoticeButtons() {
+  document.querySelectorAll(".fastiNoticeConfirmBtn").forEach((btn) => {
+    btn.onclick = () => {
+      const notice = fastiCurrentNotices.find((n) => n.id === btn.dataset.noticeId);
+      removeFastiNotice(btn.dataset.noticeId);
+      if (!notice?.action) return;
+      if (notice.action.type === "nachbestellung_vorschlagen") {
+        // Läuft nicht mehr direkt über executeFastiAction(), da vorher noch
+        // eine Kette von Optimierungs-Rückfragen kommen kann (siehe
+        // startNachbestellungVorschlag() in modules/fasti.js) - das Ergebnis
+        // wird deshalb wie ein Chat-Ergebnis über handleFastiResult()
+        // dargestellt, nicht als einfache Bestätigungs-Aktion.
+        const runtimeData = getRuntimeData();
+        if (!runtimeData) return;
+        setFastiPanelOpen(true);
+        let result;
+        try {
+          result = startNachbestellungVorschlag(notice.action, runtimeData);
+        } catch (err) {
+          console.error(err);
+          result = { reply: `Da ist etwas schiefgelaufen: ${err?.message || err}` };
+        }
+        handleFastiResult(result);
+        return;
+      }
+      runFastiAction(notice.action);
+    };
+  });
+  document.querySelectorAll(".fastiNoticeDismissBtn").forEach((btn) => {
+    btn.onclick = () => removeFastiNotice(btn.dataset.noticeId);
+  });
+}
+
+function removeFastiNotice(noticeId) {
+  fastiCurrentNotices = fastiCurrentNotices.filter((n) => n.id !== noticeId);
+  const badge = document.getElementById("fastiBadge");
+  const noticesEl = document.getElementById("fastiNotices");
+  if (!badge || !noticesEl) return;
+
+  if (fastiCurrentNotices.length === 0) {
+    badge.hidden = true;
+    noticesEl.innerHTML = "";
+    setFastiNoticesVisible(false);
+  } else {
+    badge.textContent = String(fastiCurrentNotices.length);
+    noticesEl.innerHTML = fastiCurrentNotices.map(renderFastiNoticeItem).join("");
+    bindFastiNoticeButtons();
+  }
+}
+
+function appendFastiMessage(role, text) {
+  fastiChatHistory.push({ role, text });
+  const log = document.getElementById("fastiChatLog");
+  if (!log) return;
+  const div = document.createElement("div");
+  div.className = `fasti-msg ${role}`;
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function appendFastiPendingActionMessage(reply, action) {
+  fastiPendingAction = action;
+  fastiChatHistory.push({ role: "fasti", text: reply });
+  const log = document.getElementById("fastiChatLog");
+  if (!log) return;
+
+  const div = document.createElement("div");
+  div.className = "fasti-msg fasti";
+  div.innerHTML = `
+    <div>${escapeHtml(reply)}</div>
+    <div class="fasti-notice-actions">
+      <button id="fastiConfirmActionBtn">${escapeHtml(fastiActionLabel(action))}</button>
+      <button class="secondary" id="fastiCancelActionBtn">Abbrechen</button>
+    </div>
+  `;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+
+  document.getElementById("fastiConfirmActionBtn").onclick = () => {
+    div.querySelector(".fasti-notice-actions")?.remove();
+    fastiPendingAction = null;
+    runFastiAction(action);
+  };
+  document.getElementById("fastiCancelActionBtn").onclick = () => {
+    div.querySelector(".fasti-notice-actions")?.remove();
+    fastiPendingAction = null;
+    appendFastiMessage("fasti", "Abgebrochen.");
+  };
+}
+
+// Rückfrage bei Mehrdeutigkeit (z.B. mehrere Patienten mit demselben Namen,
+// oder ein Patient mit mehreren offenen Rezepten) - jeder Kandidat ist ein
+// Button statt eines Freitext-Felds, da erneutes Schlüsselwort-Matching auf
+// eine Freitext-Antwort ("den zweiten") zu fehleranfällig wäre. Ein Klick
+// setzt den ursprünglichen Befehl über resumeFastiChoice() mit dem jetzt
+// aufgelösten Kontext fort - das Ergebnis kann erneut choices, eine action
+// oder ein navigate sein, daher der Umweg über handleFastiResult().
+function appendFastiChoicesMessage(reply, choices) {
+  fastiChatHistory.push({ role: "fasti", text: reply });
+  const log = document.getElementById("fastiChatLog");
+  if (!log) return;
+
+  const div = document.createElement("div");
+  div.className = "fasti-msg fasti";
+  div.innerHTML = `
+    <div>${escapeHtml(reply)}</div>
+    <div class="fasti-notice-actions" style="flex-direction:column; align-items:stretch;">
+      ${choices.map((c, idx) => `<button class="secondary fastiChoiceBtn" data-choice-index="${idx}">${escapeHtml(c.label)}</button>`).join("")}
+    </div>
+  `;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+
+  div.querySelectorAll(".fastiChoiceBtn").forEach((btn) => {
+    btn.onclick = () => {
+      div.querySelector(".fasti-notice-actions")?.remove();
+      const choice = choices[Number(btn.dataset.choiceIndex)];
+      const runtimeData = getRuntimeData();
+      if (!choice || !runtimeData) return;
+
+      let result;
+      try {
+        result = resumeFastiChoice(choice.resume, runtimeData);
+      } catch (err) {
+        console.error(err);
+        result = { reply: `Da ist etwas schiefgelaufen: ${err?.message || err}` };
+      }
+      handleFastiResult(result);
+    };
+  });
+}
+
+// Rückfrage nach fehlendem Freitext (z.B. der einzutragende Doku-Text) - im
+// Gegensatz zu appendFastiChoicesMessage() gibt es hier keine feste Auswahl,
+// die nächste Chat-Nachricht wird als Antwort erwartet (siehe
+// handleFastiSend()). Ein "Abbrechen"-Button bleibt trotzdem nötig, damit
+// eine unbeabsichtigt hängende Rückfrage nicht die nächste, eigentlich
+// unabhängige Nachricht verschluckt.
+function appendFastiAwaitingInputMessage(reply) {
+  fastiChatHistory.push({ role: "fasti", text: reply });
+  const log = document.getElementById("fastiChatLog");
+  if (!log) return;
+
+  const div = document.createElement("div");
+  div.className = "fasti-msg fasti";
+  div.innerHTML = `
+    <div>${escapeHtml(reply)}</div>
+    <div class="fasti-notice-actions">
+      <button class="secondary" id="fastiCancelInputBtn">Abbrechen</button>
+    </div>
+  `;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+
+  document.getElementById("fastiCancelInputBtn").onclick = () => {
+    div.querySelector(".fasti-notice-actions")?.remove();
+    fastiPendingInput = null;
+    appendFastiMessage("fasti", "Abgebrochen.");
+  };
+}
+
+// Springt zur passenden Ansicht - genau die show*View()-Funktionen, die
+// auch die reguläre Menüführung aufruft, mit der über setFastiOnLock()
+// hinterlegten onLock-Referenz. Das Panel wird dabei geschlossen, damit es
+// die neue Ansicht nicht verdeckt.
+function runFastiNavigate(navigate) {
+  const onLock = fastiOnLock;
+  if (navigate.view === "rezeptoptimierer") {
+    showRezeptoptimierungView({ onLock, homeId: navigate.homeId, patientId: navigate.patientId });
+  } else if (navigate.view === "patient-detail") {
+    showPatientDetailView({ onLock, homeId: navigate.homeId, patientId: navigate.patientId });
+  } else if (navigate.view === "rezept-create") {
+    showCreateRezeptView({ onLock, homeId: navigate.homeId, patientId: navigate.patientId });
+  } else if (navigate.view === "assessment-abfrage") {
+    showAssessmentAbfrageView({ onLock, homeId: navigate.homeId, patientId: navigate.patientId });
+  } else if (navigate.view === "arztbericht") {
+    showArztberichtView({ onLock, homeId: navigate.homeId, patientId: navigate.patientId });
+  } else if (navigate.view === "abgabe") {
+    showAbgabeView({ onLock });
+  } else if (navigate.view === "nachbestellung") {
+    showNachbestellungView({ onLock });
+  } else if (navigate.view === "kilometer") {
+    showKilometerView({ onLock });
+  } else if (navigate.view === "stundenkonto") {
+    showStundenkontoView({ onLock });
+  } else if (navigate.view === "patientenliste") {
+    showPatientenListeView({ onLock });
+  } else if (navigate.view === "patient-create") {
+    showCreatePatientRezeptView({ onLock, homeId: navigate.homeId });
+  } else if (navigate.view === "homes") {
+    showHomesView({ onLock });
+  }
+}
+
+// Gemeinsame Weiche für jedes Ergebnis von answerFastiChat()/
+// resumeFastiChoice() - genau eines von reply-only, choices, action oder
+// navigate ist gesetzt.
+function handleFastiResult(result) {
+  fastiPendingInput = null;
+
+  // Bisher hat nur runFastiAction() (der Bestätigen/Abbrechen-Weg) persistiert -
+  // seit der Doku+Zeitbuchung-Rückfrage (answerDokuZeitBuchenChoice()) kann
+  // aber auch eine direkt aus einer choices-Auswahl aufgelöste Antwort schon
+  // eine echte Mutation sein (kein zweiter Bestätigungsklick nötig, da die
+  // choice selbst schon die explizite Nutzerentscheidung ist).
+  if (result.needsPersist) queuePersistRuntimeData();
+
+  if (result.choices) {
+    appendFastiChoicesMessage(result.reply, result.choices);
+  } else if (result.action) {
+    appendFastiPendingActionMessage(result.reply, result.action);
+  } else if (result.navigate) {
+    appendFastiMessage("fasti", result.reply);
+    setFastiPanelOpen(false);
+    runFastiNavigate(result.navigate);
+  } else if (result.awaitingInput) {
+    fastiPendingInput = result.awaitingInput;
+    appendFastiAwaitingInputMessage(result.reply);
+  } else {
+    appendFastiMessage("fasti", result.reply);
+  }
+}
+
+// Führt eine bestätigte FaSti-Aktion aus. Bei einer Nachbestellung MUSS
+// openLetterPreview() synchron in derselben Klick-Handler-Kette aufgerufen
+// werden (siehe createNachbestellLetterBtn weiter oben) - deshalb hier kein
+// await vor dem window.open()-Aufruf.
+function runFastiAction(action) {
+  const runtimeData = getRuntimeData();
+  if (!runtimeData) return;
+
+  try {
+    const result = executeFastiAction(action, runtimeData);
+
+    if (result.letterData) {
+      const bodyHtml = renderNachbestellLetterHtml(result.letterData, { versandart: "fax" });
+      openLetterPreview(result.letterData.title, bodyHtml);
+      saveNachbestellHistorySnapshot({
+        title: `Nachbestellung ${result.letterData.doctor} · ${formatIsoDateShort(result.letterData.createdAt)}`,
+        doctor: result.letterData.doctor,
+        createdAt: result.letterData.createdAt,
+        rezeptCount: result.letterData.rezeptCount,
+        patientCount: result.letterData.patientCount,
+        snapshotHtml: bodyHtml,
+        lines: flattenNachbestellLines(result.letterData)
+      });
+      queuePersistRuntimeData();
+    } else if (result.needsPersist) {
+      queuePersistRuntimeData();
+    }
+
+    appendFastiMessage("fasti", result.message);
+    setFastiAnimation("nicken");
+
+    // Manche Aktionen (aktuell: Doku-Eintrag anlegen) stellen direkt danach
+    // eine Anschlussfrage, z.B. ob dafür auch Zeit gebucht werden soll.
+    if (result.followUp) {
+      appendFastiChoicesMessage(result.followUp.reply, result.followUp.choices);
+    }
+  } catch (err) {
+    console.error(err);
+    appendFastiMessage("fasti", `Aktion fehlgeschlagen: ${err?.message || err}`);
+  }
+}
+
+function handleFastiSend() {
+  const input = document.getElementById("fastiChatInput");
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  appendFastiMessage("user", text);
+
+  const runtimeData = getRuntimeData();
+  if (!runtimeData) {
+    appendFastiMessage("fasti", "Ich habe gerade keinen Zugriff auf die App-Daten.");
+    return;
+  }
+
+  let result;
+  try {
+    if (fastiPendingInput) {
+      // Vorherige Rückfrage nach Freitext (z.B. Doku-Inhalt oder
+      // Abwesenheits-Zeitraum) wartet - diese Nachricht ist die Antwort
+      // darauf, nicht ein neuer Befehl.
+      const resume = { ...fastiPendingInput.resume, freeTextAnswer: text };
+      fastiPendingInput = null;
+      result = resumeFastiChoice(resume, runtimeData);
+    } else {
+      result = answerFastiChat(text, runtimeData);
+    }
+  } catch (err) {
+    console.error(err);
+    result = { reply: `Da ist etwas schiefgelaufen: ${err?.message || err}` };
+  }
+
+  handleFastiResult(result);
+}
+
+// Geräteweite Anzeige-Präferenzen (Button-Position, Meldungen-Höhe) - bewusst
+// in localStorage statt in den synchronisierten App-Daten, da es sich um
+// reine Display-Einstellungen dieses einen Geräts/Browsers handelt, keine
+// Praxisdaten.
+const FASTI_BTN_POS_KEY = "fastiBtnPos";
+const FASTI_NOTICES_HEIGHT_KEY = "fastiNoticesHeight";
+const FASTI_NOTICES_MIN_HEIGHT = 60;
+const FASTI_NOTICES_MAX_HEIGHT = 420;
+let fastiBtnHasCustomPos = false;
+
+function clampFastiBtnPos(x, y, btn) {
+  const margin = 4;
+  const w = btn.offsetWidth || 58;
+  const h = btn.offsetHeight || 58;
+  const maxX = Math.max(margin, window.innerWidth - w - margin);
+  const maxY = Math.max(margin, window.innerHeight - h - margin);
+  return { x: Math.min(Math.max(x, margin), maxX), y: Math.min(Math.max(y, margin), maxY) };
+}
+
+function applyFastiBtnPos(btn, x, y) {
+  btn.style.left = `${x}px`;
+  btn.style.top = `${y}px`;
+  btn.style.right = "auto";
+  btn.style.bottom = "auto";
+}
+
+// Macht den FaSti-Button per Zeigereingabe (Maus/Touch) frei verschiebbar.
+// Ein Tap (kein nennenswertes Verschieben) öffnet weiterhin das Panel über
+// onTap() - es gibt bewusst KEINEN separaten "click"-Listener mehr, um nicht
+// doppelt (Drag-Ende UND Klick) zu reagieren.
+function makeFastiButtonDraggable(btn, onTap) {
+  try {
+    const raw = localStorage.getItem(FASTI_BTN_POS_KEY);
+    if (raw) {
+      const pos = JSON.parse(raw);
+      if (Number.isFinite(pos?.x) && Number.isFinite(pos?.y)) {
+        const clamped = clampFastiBtnPos(pos.x, pos.y, btn);
+        applyFastiBtnPos(btn, clamped.x, clamped.y);
+        fastiBtnHasCustomPos = true;
+      }
+    }
+  } catch {}
+
+  let dragging = false;
+  let moved = false;
+  let startClientX = 0;
+  let startClientY = 0;
+  let startLeft = 0;
+  let startTop = 0;
+
+  btn.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    moved = false;
+    const rect = btn.getBoundingClientRect();
+    startClientX = e.clientX;
+    startClientY = e.clientY;
+    startLeft = rect.left;
+    startTop = rect.top;
+    try { btn.setPointerCapture(e.pointerId); } catch {}
+  });
+
+  btn.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - startClientX;
+    const dy = e.clientY - startClientY;
+    if (!moved && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) moved = true;
+    if (moved) {
+      const clamped = clampFastiBtnPos(startLeft + dx, startTop + dy, btn);
+      applyFastiBtnPos(btn, clamped.x, clamped.y);
+    }
+  });
+
+  function endDrag(e) {
+    if (!dragging) return;
+    dragging = false;
+    if (moved) {
+      fastiBtnHasCustomPos = true;
+      const rect = btn.getBoundingClientRect();
+      try { localStorage.setItem(FASTI_BTN_POS_KEY, JSON.stringify({ x: rect.left, y: rect.top })); } catch {}
+    } else {
+      onTap();
+    }
+    try { btn.releasePointerCapture(e.pointerId); } catch {}
+  }
+
+  btn.addEventListener("pointerup", endDrag);
+  btn.addEventListener("pointercancel", endDrag);
+
+  // Nur re-clampen, wenn der Nutzer den Button zuvor bewusst verschoben hat -
+  // sonst bliebe die normale rechts/unten-Standardposition unnötig angetastet.
+  window.addEventListener("resize", () => {
+    if (!fastiBtnHasCustomPos) return;
+    const rect = btn.getBoundingClientRect();
+    const clamped = clampFastiBtnPos(rect.left, rect.top, btn);
+    applyFastiBtnPos(btn, clamped.x, clamped.y);
+  });
+}
+
+function clampFastiNoticesHeight(h) {
+  return Math.min(FASTI_NOTICES_MAX_HEIGHT, Math.max(FASTI_NOTICES_MIN_HEIGHT, h));
+}
+
+function applyFastiNoticesHeight(h) {
+  const noticesEl = document.getElementById("fastiNotices");
+  if (noticesEl) noticesEl.style.height = `${h}px`;
+}
+
+// Macht die Trennlinie zwischen Meldungen und Chat-Verlauf per Zeigereingabe
+// höhenverstellbar, damit wahlweise mehr Meldungen oder mehr Chat sichtbar
+// ist - die gewählte Höhe wird geräteweit gemerkt (siehe FASTI_NOTICES_HEIGHT_KEY).
+function makeFastiNoticesResizable() {
+  const resizer = document.getElementById("fastiNoticesResizer");
+  const noticesEl = document.getElementById("fastiNotices");
+  if (!resizer || !noticesEl) return;
+
+  try {
+    const raw = localStorage.getItem(FASTI_NOTICES_HEIGHT_KEY);
+    if (raw) applyFastiNoticesHeight(clampFastiNoticesHeight(Number(raw)));
+  } catch {}
+
+  let dragging = false;
+  let startY = 0;
+  let startHeight = 0;
+
+  resizer.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    startY = e.clientY;
+    startHeight = noticesEl.getBoundingClientRect().height;
+    try { resizer.setPointerCapture(e.pointerId); } catch {}
+  });
+
+  resizer.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    applyFastiNoticesHeight(clampFastiNoticesHeight(startHeight + (e.clientY - startY)));
+  });
+
+  function endResize(e) {
+    if (!dragging) return;
+    dragging = false;
+    const h = Math.round(noticesEl.getBoundingClientRect().height);
+    try { localStorage.setItem(FASTI_NOTICES_HEIGHT_KEY, String(h)); } catch {}
+    try { resizer.releasePointerCapture(e.pointerId); } catch {}
+  }
+
+  resizer.addEventListener("pointerup", endResize);
+  resizer.addEventListener("pointercancel", endResize);
+}
+
+// Blendet Meldungsliste, Resize-Griff und "Alle Meldungen aus"-Button
+// gemeinsam ein/aus - die drei gehören immer zusammen (kein Sinn, den
+// Resize-Griff zu zeigen, wenn es nichts zum Anzeigen gibt).
+function setFastiNoticesVisible(visible) {
+  const panel = document.getElementById("fastiPanel");
+  const noticesEl = document.getElementById("fastiNotices");
+  const resizer = document.getElementById("fastiNoticesResizer");
+  const dismissAllBtn = document.getElementById("fastiDismissAllBtn");
+  if (noticesEl) noticesEl.hidden = !visible;
+  if (resizer) resizer.hidden = !visible;
+  if (dismissAllBtn) dismissAllBtn.hidden = !visible;
+  // Ohne Meldungen darf das Panel weiterhin kompakt auf seinen Inhalt
+  // schrumpfen (nur max-height als Obergrenze). Mit Meldungen MUSS das Panel
+  // dagegen eine feste Höhe bekommen, sonst hat der Chat-Log (flex:1) keinen
+  // erzwungenen Restplatz, in den er hineinwachsen könnte, wenn die
+  // Meldungsliste per Drag-Griff verkleinert wird - das Panel würde dann nur
+  // insgesamt kürzer, statt dass der Chat-Teil größer wird (siehe
+  // makeFastiNoticesResizable()).
+  if (panel) panel.style.height = visible ? "min(72vh, 640px)" : "";
+}
+
+// Verwirft auf einen Schlag alle aktuell angezeigten Hinweise (Button im
+// grünen Header) - Pendant zum einzelnen "Ignorieren" pro Meldung.
+function dismissAllFastiNotices() {
+  fastiCurrentNotices = [];
+  const badge = document.getElementById("fastiBadge");
+  const noticesEl = document.getElementById("fastiNotices");
+  if (badge) badge.hidden = true;
+  if (noticesEl) noticesEl.innerHTML = "";
+  setFastiNoticesVisible(false);
+}
+
+function ensureFastiWidget() {
+  ensureFastiStyles();
+  if (document.getElementById("fastiWidgetBtn")) return;
+
+  const btn = document.createElement("div");
+  btn.id = "fastiWidgetBtn";
+  btn.className = "fasti-btn";
+  btn.hidden = true;
+  btn.innerHTML = `${FASTI_SVG}<span id="fastiBadge" class="fasti-badge" hidden>0</span>`;
+  document.body.appendChild(btn);
+  makeFastiButtonDraggable(btn, () => toggleFastiPanel());
+
+  const panel = document.createElement("div");
+  panel.id = "fastiPanel";
+  panel.className = "fasti-panel";
+  panel.hidden = true;
+  panel.innerHTML = `
+    <div class="fasti-panel-header">
+      <span>FaSti</span>
+      <div class="fasti-header-actions">
+        <button id="fastiDismissAllBtn" class="fasti-dismiss-all-btn" hidden>Alle Meldungen aus</button>
+        <button id="fastiCloseBtn" class="fasti-close-btn" aria-label="Schließen">✕</button>
+      </div>
+    </div>
+    <div id="fastiNotices" class="fasti-notices" hidden></div>
+    <div id="fastiNoticesResizer" class="fasti-notices-resizer" hidden></div>
+    <div id="fastiChatLog" class="fasti-chat-log"></div>
+    <div class="fasti-chat-input-row">
+      <input id="fastiChatInput" type="text" placeholder="Frag FaSti…" autocomplete="off">
+      <button id="fastiSendBtn">Senden</button>
+    </div>
+  `;
+  document.body.appendChild(panel);
+
+  document.getElementById("fastiCloseBtn").onclick = () => setFastiPanelOpen(false);
+  document.getElementById("fastiDismissAllBtn").onclick = () => dismissAllFastiNotices();
+  document.getElementById("fastiSendBtn").onclick = handleFastiSend;
+  document.getElementById("fastiChatInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") handleFastiSend();
+  });
+  makeFastiNoticesResizable();
+}
+
+// Von core/boot.js nach dem Login mit den frisch berechneten Hinweisen
+// (modules/fasti.js: buildFastiNotices()) aufzurufen. Das Chat-Panel bleibt
+// dabei bewusst GESCHLOSSEN (Nutzer-Feedback: "Chatfenster soll beim Start
+// der App geschlossen sein") - nur der Button + Badge werden gezeigt, die
+// Aufwach-Animation macht kurz auf neue Hinweise aufmerksam, ohne das Panel
+// aufzudrängen. Der Nutzer öffnet es bei Bedarf selbst per Klick/Tap.
+export function showFastiNotices(notices) {
+  ensureFastiWidget();
+  document.getElementById("fastiWidgetBtn").hidden = false;
+  fastiCurrentNotices = Array.isArray(notices) ? notices : [];
+
+  const badge = document.getElementById("fastiBadge");
+  const noticesEl = document.getElementById("fastiNotices");
+  if (!badge || !noticesEl) return;
+
+  if (fastiCurrentNotices.length === 0) {
+    badge.hidden = true;
+    noticesEl.innerHTML = "";
+    setFastiNoticesVisible(false);
+    return;
+  }
+
+  badge.hidden = false;
+  badge.textContent = String(fastiCurrentNotices.length);
+  noticesEl.innerHTML = fastiCurrentNotices.map(renderFastiNoticeItem).join("");
+  setFastiNoticesVisible(true);
+  bindFastiNoticeButtons();
+
+  setFastiAnimation("aufwachen");
+}
+
+// Von core/boot.js beim Sperren aufzurufen: blendet das Widget nicht nur
+// aus, sondern verwirft auch Chat-Verlauf/Hinweise, da diese Patientennamen
+// enthalten können und sonst über die Sperre hinweg im DOM stehen blieben.
+export function hideFastiWidget() {
+  const btn = document.getElementById("fastiWidgetBtn");
+  const panel = document.getElementById("fastiPanel");
+  if (btn) btn.hidden = true;
+  if (panel) panel.hidden = true;
+
+  fastiChatHistory = [];
+  fastiPendingAction = null;
+  fastiPendingInput = null;
+  fastiCurrentNotices = [];
+
+  const log = document.getElementById("fastiChatLog");
+  if (log) log.innerHTML = "";
+  const noticesEl = document.getElementById("fastiNotices");
+  if (noticesEl) noticesEl.innerHTML = "";
+  setFastiNoticesVisible(false);
+  const badge = document.getElementById("fastiBadge");
+  if (badge) badge.hidden = true;
 }

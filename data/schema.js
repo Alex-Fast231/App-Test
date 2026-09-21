@@ -30,6 +30,8 @@ export function createEmptyAppData() {
       weeklyHours: "",
       fastStartDatum: "",
       stundenStartsaldoMinuten: 0,
+      jahresurlaubTage: 0,
+      fastiEnabled: true,
       zertifikate: {
         kgzns: false,
         mt: false,
@@ -87,7 +89,8 @@ export function createEmptyAppData() {
 
     ui: {
       lastBackupAt: "",
-      lastAutoExportAt: ""
+      lastAutoExportAt: "",
+      lastFastiWeeklySummaryAt: ""
     }
   };
 }
