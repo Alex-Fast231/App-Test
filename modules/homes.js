@@ -861,19 +861,24 @@ export function getArztRegistry(data) {
 
   (data?.aerzte || []).forEach((arzt) => {
     const name = String(arzt?.name || "").trim();
-    if (name) registryByName.set(name, arzt.adresse || "");
+    if (name) registryByName.set(name, { adresse: arzt.adresse || "", email: arzt.email || "" });
   });
 
   namesFromRezepte.forEach((name) => {
-    if (!registryByName.has(name)) registryByName.set(name, "");
+    if (!registryByName.has(name)) registryByName.set(name, { adresse: "", email: "" });
   });
 
   return Array.from(registryByName.entries())
-    .map(([name, adresse]) => ({ name, adresse }))
+    .map(([name, { adresse, email }]) => ({ name, adresse, email }))
     .sort((a, b) => a.name.localeCompare(b.name, "de"));
 }
 
-export function upsertArztAdresse(name, adresse) {
+// email ist bewusst optional (dritter Parameter): wird er weggelassen
+// (undefined), bleibt eine bereits hinterlegte E-Mail-Adresse unangetastet -
+// die meisten Aufrufer (Rezept anlegen/bearbeiten) pflegen nur die Adresse,
+// nicht die E-Mail, und sollen eine dort separat gepflegte E-Mail nicht
+// versehentlich leeren.
+export function upsertArztAdresse(name, adresse, email) {
   const normalizedName = String(name || "").trim();
   if (!normalizedName) throw new Error("Arztname fehlt");
 
@@ -883,12 +888,64 @@ export function upsertArztAdresse(name, adresse) {
 
     if (existing) {
       existing.adresse = String(adresse || "").trim();
+      if (email !== undefined) existing.email = String(email || "").trim();
       existing.updatedAt = new Date().toISOString();
     } else {
       data.aerzte.push({
         id: generateId("arzt"),
         name: normalizedName,
         adresse: String(adresse || "").trim(),
+        email: email !== undefined ? String(email || "").trim() : "",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+    }
+  });
+}
+
+// Ärzte werden überall nur über den Namensstring referenziert (rezept.arzt),
+// es gibt keine arztId - eine Umbenennung muss deshalb den neuen Namen in
+// JEDES betroffene Rezept zurückschreiben, sonst würde der Arzt beim
+// Speichern nur der Registry-Eintrag umbenannt, während alle Rezepte/
+// Patienten weiterhin auf den alten (jetzt verwaisten) Namen verweisen und
+// aus der Arztübersicht/Nachbestellung verschwinden. Eine Umbenennung auf
+// einen bereits existierenden anderen Arztnamen wird abgelehnt statt
+// stillschweigend zusammenzuführen, um versehentliches Vermischen zweier
+// Ärzte zu vermeiden.
+export function renameArzt(oldName, newName) {
+  const trimmedOld = String(oldName || "").trim();
+  const trimmedNew = String(newName || "").trim();
+  if (!trimmedNew) throw new Error("Arztname darf nicht leer sein.");
+  if (trimmedOld === trimmedNew) return;
+
+  mutateRuntimeData((data) => {
+    const collision = getDoctorList(data).includes(trimmedNew)
+      || (data.aerzte || []).some((arzt) => String(arzt.name || "").trim() === trimmedNew);
+    if (collision) {
+      throw new Error(`Es gibt bereits einen Arzt namens "${trimmedNew}".`);
+    }
+
+    (data.homes || []).forEach((home) => {
+      (home.patients || []).forEach((patient) => {
+        (patient.rezepte || []).forEach((rezept) => {
+          if (String(rezept.arzt || "").trim() === trimmedOld) {
+            rezept.arzt = trimmedNew;
+          }
+        });
+      });
+    });
+
+    if (!Array.isArray(data.aerzte)) data.aerzte = [];
+    const entry = data.aerzte.find((arzt) => String(arzt.name || "").trim() === trimmedOld);
+    if (entry) {
+      entry.name = trimmedNew;
+      entry.updatedAt = new Date().toISOString();
+    } else {
+      data.aerzte.push({
+        id: generateId("arzt"),
+        name: trimmedNew,
+        adresse: "",
+        email: "",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       });
