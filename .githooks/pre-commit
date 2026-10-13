@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Erhöht die Patch-Version in data/schema.js automatisch bei jedem Commit,
+# der Code ändert - manuelles Hochsetzen wurde über ~10 Sessions hinweg
+# zuverlässig vergessen, deshalb jetzt strukturell statt per Erinnerung
+# gelöst (siehe HANDOFF_SUMMARY.md).
+set -euo pipefail
+
+SCHEMA_FILE="data/schema.js"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+if [ -z "$staged_files" ]; then
+  exit 0
+fi
+
+# Reine Doku-/Text-Commits (z.B. nur HANDOFF_SUMMARY.md) lösen keinen Bump
+# aus - es gibt in dem Fall keine neue App-Version zum Ausliefern.
+non_doc_files="$(echo "$staged_files" | grep -vE '\.(md|txt)$' || true)"
+if [ -z "$non_doc_files" ]; then
+  exit 0
+fi
+
+# Wurde APP_VERSION in diesem Commit bereits selbst manuell geändert (z.B.
+# bewusster Minor-/Major-Sprung), nicht zusätzlich automatisch bumpen. Ein
+# Commit, der data/schema.js nur aus anderem Grund anfasst (z.B. ein
+# Kommentar), soll den Bump weiterhin ganz normal auslösen - deshalb wird
+# hier gezielt die APP_VERSION-Zeile im Diff geprüft, nicht nur ob die Datei
+# überhaupt Teil des Commits ist.
+if echo "$staged_files" | grep -qx "$SCHEMA_FILE" \
+  && git diff --cached -- "$SCHEMA_FILE" | grep -qE '^\+.*APP_VERSION = "'; then
+  exit 0
+fi
+
+if [ ! -f "$SCHEMA_FILE" ]; then
+  exit 0
+fi
+
+current_version="$(grep -oE 'APP_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"' "$SCHEMA_FILE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+if [ -z "$current_version" ]; then
+  echo "pre-commit: APP_VERSION in $SCHEMA_FILE nicht gefunden, kein automatischer Bump." >&2
+  exit 0
+fi
+
+major="$(echo "$current_version" | cut -d. -f1)"
+minor="$(echo "$current_version" | cut -d. -f2)"
+patch="$(echo "$current_version" | cut -d. -f3)"
+new_patch=$((patch + 1))
+new_version="${major}.${minor}.${new_patch}"
+
+sed -i.bak -E "s/APP_VERSION = \"${current_version}\"/APP_VERSION = \"${new_version}\"/" "$SCHEMA_FILE"
+rm -f "${SCHEMA_FILE}.bak"
+
+git add "$SCHEMA_FILE"
+echo "pre-commit: APP_VERSION ${current_version} -> ${new_version}"
