@@ -37,6 +37,7 @@ export function createEmptyAppData() {
       stundenStartsaldoMinuten: 0,
       jahresurlaubTage: 0,
       fastiEnabled: true,
+      dokuPruefungDeaktiviert: false,
       zertifikate: {
         kgzns: false,
         mt: false,
