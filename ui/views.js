@@ -1,5 +1,5 @@
 import { createEmptyAppData, APP_VERSION, PRACTICE_ADDRESS, PRACTICE_PHONE } from "../data/schema.js";
-import { setupSecurity, unlockWithPIN } from "../security/auth.js";
+import { setupSecurity, unlockWithPIN, changePIN } from "../security/auth.js";
 import { getRemainingLockoutMs } from "../security/lock.js";
 import {
   getCryptoMeta,
@@ -966,7 +966,25 @@ function bindDateAutoFormat(input) {
   input.setAttribute("maxlength", "10");
   input.setAttribute("placeholder", input.getAttribute("placeholder") || "TT.MM.JJJJ");
   input.addEventListener("input", () => {
-    input.value = normalizeDeDateInput(input.value);
+    // Das bloße Neuzuweisen von input.value springt in den meisten Browsern
+    // IMMER ans Feldende, auch wenn sich der Text gar nicht ändert - ohne
+    // Gegenmaßnahme sprang der Cursor nach jedem Tastendruck ans Ende, sodass
+    // man z.B. nur den Tag mittendrin ändern wollte, aber der nächste
+    // Tastendruck am Ende statt an der gewünschten Stelle landete (Nutzer
+    // musste deshalb immer das komplette Feld löschen und neu eintippen).
+    // Fix: Position als "Anzahl Ziffern vor dem Cursor" merken (bleibt beim
+    // Einfügen/Entfernen der Trennpunkte stabil) und danach wiederherstellen.
+    const caret = input.selectionStart ?? input.value.length;
+    const digitsBeforeCaret = (input.value.slice(0, caret).match(/\d/g) || []).length;
+    const formatted = normalizeDeDateInput(input.value);
+    input.value = formatted;
+    let newPos = 0;
+    let digitsSeen = 0;
+    while (newPos < formatted.length && digitsSeen < digitsBeforeCaret) {
+      if (/\d/.test(formatted[newPos])) digitsSeen++;
+      newPos++;
+    }
+    input.setSelectionRange(newPos, newPos);
   });
   input.addEventListener("blur", () => {
     input.value = normalizeDeDateInput(input.value);
@@ -1972,7 +1990,10 @@ export async function triggerAutomaticBackupDownload(runtimeData) {
     const result = await exportBackup(runtimeData);
     downloadBlob(result.blob, result.filename);
     await markAutoBackupDownloadHandled(`Automatisches Backup "${result.filename}" heruntergeladen.`);
-    showToast(`Automatisches Backup heruntergeladen: ${result.filename}`, 6000);
+    // Bewusst kein showToast() mehr (Nutzerfeedback: die Meldung beim
+    // Öffnen der App wurde als störend empfunden) - der Download selbst
+    // läuft weiterhin ganz normal und unverändert im Hintergrund, nur ohne
+    // sichtbare Benachrichtigung darüber.
   } catch (err) {
     console.error("Automatischer Backup-Download fehlgeschlagen:", err);
   }
@@ -2699,6 +2720,15 @@ function requestPracticePasswordForBackup() {
   return getFixedPracticePassword();
 }
 
+// PIN zum Deaktivieren der FaSti-Doku-Prüfung (Einstellungen) - auf
+// Nutzerwunsch fest auf "3010" gesetzt, nur zum Einschalten nötig (das
+// Wiedereinschalten der Prüfung braucht keine PIN). Wie beim
+// Praxispasswort nur Base64-codiert, keine echte Sicherheitsmaßnahme.
+const DOKU_PRUEFUNG_PIN_ENCODED = "MzAxMA==";
+function getDokuPruefungPin() {
+  return atob(DOKU_PRUEFUNG_PIN_ENCODED);
+}
+
 async function runBackupImportFlow({ file, messageElement, successMessage, beforeReload }) {
   if (!file || !messageElement) return;
 
@@ -3081,6 +3111,16 @@ export function showSettingsView({ onLock }) {
 
       <h3 style="margin-top:20px;">FaSti</h3>
       <label class="check-chip"><input id="settingsFastiEnabled" type="checkbox" ${settings.fastiEnabled !== false ? "checked" : ""}> <span>FaSti aktiviert</span></label>
+      <label class="check-chip" style="margin-top:8px;"><input id="settingsDokuPruefungDeaktiviert" type="checkbox" ${settings.dokuPruefungDeaktiviert ? "checked" : ""}> <span>Doku-Prüfung deaktivieren (FaSti meldet dann keine fehlende Doku mehr)</span></label>
+      <div id="dokuPruefungPinWrap" style="display:none; margin-top:10px;">
+        <label for="dokuPruefungPinInput">PIN zum Deaktivieren</label>
+        <input id="dokuPruefungPinInput" type="password" inputmode="numeric" autocomplete="off" maxlength="4">
+        <div class="row" style="margin-top:8px;">
+          <button type="button" id="confirmDokuPruefungPinBtn" class="secondary">Bestätigen</button>
+          <button type="button" id="cancelDokuPruefungPinBtn" class="secondary">Abbrechen</button>
+        </div>
+        <div id="dokuPruefungPinMsg" class="error"></div>
+      </div>
 
       <h3 style="margin-top:20px;">Zertifikate</h3>
       <div class="checkbox-row">
@@ -3103,6 +3143,22 @@ export function showSettingsView({ onLock }) {
     </div>
 
     <div class="card">
+      <h3>PIN ändern</h3>
+
+      <label for="settingsCurrentPin">Aktuelle PIN</label>
+      <input id="settingsCurrentPin" type="password" inputmode="numeric" autocomplete="current-password">
+
+      <label for="settingsNewPin">Neue PIN (mindestens 6 Zeichen)</label>
+      <input id="settingsNewPin" type="password" inputmode="numeric" autocomplete="new-password">
+
+      <label for="settingsNewPinRepeat">Neue PIN wiederholen</label>
+      <input id="settingsNewPinRepeat" type="password" inputmode="numeric" autocomplete="new-password">
+
+      <button id="changePinBtn" class="secondary">PIN ändern</button>
+      <div id="changePinMsg"></div>
+    </div>
+
+    <div class="card">
       <h3>App-Version</h3>
       <p class="muted">Aktuelle Version: ${escapeHtml(APP_VERSION)}</p>
       <button id="checkForUpdatesBtn" class="secondary">Aktualisieren</button>
@@ -3117,7 +3173,55 @@ export function showSettingsView({ onLock }) {
     showDashboardView({ onLock });
   };
 
-  document.getElementById("saveSettingsBtn").onclick = async () => {
+  // Doku-Prüfung deaktivieren: nur mit PIN einschaltbar (Nutzerwunsch) - das
+  // Wiedereinschalten der Prüfung (Checkbox wieder abwählen) braucht keine
+  // PIN, da das nur die Kontrolle verschärft statt sie zu lockern.
+  const dokuPruefungCheckbox = document.getElementById("settingsDokuPruefungDeaktiviert");
+  const dokuPruefungPinWrap = document.getElementById("dokuPruefungPinWrap");
+  const dokuPruefungPinInput = document.getElementById("dokuPruefungPinInput");
+  const dokuPruefungPinMsg = document.getElementById("dokuPruefungPinMsg");
+
+  dokuPruefungCheckbox.addEventListener("change", () => {
+    if (dokuPruefungCheckbox.checked) {
+      dokuPruefungCheckbox.checked = false;
+      dokuPruefungCheckbox.closest(".check-chip")?.classList.remove("is-checked");
+      dokuPruefungPinWrap.style.display = "";
+      dokuPruefungPinMsg.textContent = "";
+      dokuPruefungPinInput.value = "";
+      dokuPruefungPinInput.focus();
+    } else {
+      dokuPruefungPinWrap.style.display = "none";
+    }
+  });
+
+  document.getElementById("confirmDokuPruefungPinBtn").onclick = () => {
+    if (dokuPruefungPinInput.value.trim() !== getDokuPruefungPin()) {
+      dokuPruefungPinMsg.textContent = "Falsche PIN.";
+      return;
+    }
+    dokuPruefungCheckbox.checked = true;
+    dokuPruefungCheckbox.closest(".check-chip")?.classList.add("is-checked");
+    dokuPruefungPinWrap.style.display = "none";
+    dokuPruefungPinMsg.textContent = "";
+  };
+
+  document.getElementById("cancelDokuPruefungPinBtn").onclick = () => {
+    dokuPruefungPinWrap.style.display = "none";
+    dokuPruefungPinMsg.textContent = "";
+  };
+
+  // Liest+validiert+speichert alle allgemeinen Einstellungsfelder (Name,
+  // Fax, Arbeitstage, Stunden, Jahresurlaub, FaSti, Doku-Prüfung,
+  // Zertifikate, Büro-Mail, Assessment-Intervall). Wird sowohl vom
+  // "Änderungen speichern"-Button als auch vom "PIN ändern"-Button
+  // aufgerufen, damit beim PIN-Wechsel nichts verloren geht, was auf
+  // derselben Seite eingegeben, aber nicht separat über "Änderungen
+  // speichern" gesichert wurde - landet dadurch garantiert mit im nächsten
+  // Backup. Wirft bei einem Validierungsfehler, statt still fehlzuschlagen,
+  // damit der aufrufende Button-Handler die Meldung anzeigen und z.B. die
+  // PIN-Änderung NICHT durchführen kann, wenn die übrigen Angaben ungültig
+  // sind (kein halb gespeicherter Zustand).
+  async function saveGeneralSettings() {
     const therapistName = document.getElementById("settingsTherapistName").value.trim();
     const practiceAddress = PRACTICE_ADDRESS;
     const practicePhone = PRACTICE_PHONE;
@@ -3130,6 +3234,7 @@ export function showSettingsView({ onLock }) {
     const jahresurlaubTageInput = document.getElementById("settingsJahresurlaubTage").value.trim();
     const jahresurlaubTage = jahresurlaubTageInput === "" ? 0 : Number(jahresurlaubTageInput);
     const fastiEnabled = document.getElementById("settingsFastiEnabled").checked;
+    const dokuPruefungDeaktiviert = document.getElementById("settingsDokuPruefungDeaktiviert").checked;
     const zertifikate = {
       mt: document.getElementById("zertMt").checked,
       mld: document.getElementById("zertMld").checked,
@@ -3137,66 +3242,116 @@ export function showSettingsView({ onLock }) {
     };
     const bueroEmail = document.getElementById("settingsBueroEmail").value.trim();
     const assessmentIntervalMonths = Number(document.getElementById("settingsAssessmentInterval").value);
-    const msg = document.getElementById("settingsMessage");
-
-    msg.className = "error";
-    msg.textContent = "";
 
     if (!isValidWeeklyHours(weeklyHours)) {
-      msg.textContent = "Die Arbeitsstunden pro Woche müssen als Zahl eingegeben werden, z. B. 20 oder 38.5.";
-      return;
+      throw new Error("Die Arbeitsstunden pro Woche müssen als Zahl eingegeben werden, z. B. 20 oder 38.5.");
     }
 
     if (fastStartDatumInput && !fastStartDatum) {
-      msg.textContent = "Das Startdatum bei FaSt muss im Format TT.MM.JJJJ eingegeben werden.";
-      return;
+      throw new Error("Das Startdatum bei FaSt muss im Format TT.MM.JJJJ eingegeben werden.");
     }
 
     if (stundenStartsaldoMinuten === null) {
-      msg.textContent = "Der Startsaldo muss im Format +HH:MM oder -HH:MM eingegeben werden, z. B. +40:00.";
-      return;
+      throw new Error("Der Startsaldo muss im Format +HH:MM oder -HH:MM eingegeben werden, z. B. +40:00.");
     }
 
     if (!Number.isFinite(jahresurlaubTage) || jahresurlaubTage < 0) {
-      msg.textContent = "Der Jahresurlaub muss als Zahl (Tage) eingegeben werden, z. B. 30.";
-      return;
+      throw new Error("Der Jahresurlaub muss als Zahl (Tage) eingegeben werden, z. B. 30.");
     }
 
+    mutateRuntimeData((data) => {
+      data.settings.therapistName = therapistName;
+      data.settings.practiceAddress = practiceAddress;
+      data.settings.practicePhone = practicePhone;
+      data.settings.therapistFax = therapistFax;
+      data.settings.workDays = workDays;
+      data.settings.weeklyHours = weeklyHours;
+      data.settings.fastStartDatum = fastStartDatum;
+      data.settings.stundenStartsaldoMinuten = stundenStartsaldoMinuten;
+      data.settings.jahresurlaubTage = jahresurlaubTage;
+      data.settings.fastiEnabled = fastiEnabled;
+      data.settings.dokuPruefungDeaktiviert = dokuPruefungDeaktiviert;
+      data.settings.zertifikate = zertifikate;
+      data.settings.buero = { email: bueroEmail };
+      data.settings.assessmentIntervalMonths = assessmentIntervalMonths;
+      data.settings.updatedAt = new Date().toISOString();
+    });
+
+    await queuePersistRuntimeData();
+
+    // Sofort wirksam machen, ohne dass ein erneutes Ein-/Ausloggen nötig
+    // ist - "aus" blendet Button+Panel sofort aus, "an" baut sie (falls
+    // gerade deaktiviert) mit frisch berechneten Hinweisen wieder auf.
+    if (fastiEnabled) {
+      showFastiNotices(buildFastiNotices(getRuntimeData()));
+    } else {
+      hideFastiWidget();
+    }
+  }
+
+  document.getElementById("saveSettingsBtn").onclick = async () => {
+    const msg = document.getElementById("settingsMessage");
+    msg.className = "error";
+    msg.textContent = "";
+
     try {
-      mutateRuntimeData((data) => {
-        data.settings.therapistName = therapistName;
-        data.settings.practiceAddress = practiceAddress;
-        data.settings.practicePhone = practicePhone;
-        data.settings.therapistFax = therapistFax;
-        data.settings.workDays = workDays;
-        data.settings.weeklyHours = weeklyHours;
-        data.settings.fastStartDatum = fastStartDatum;
-        data.settings.stundenStartsaldoMinuten = stundenStartsaldoMinuten;
-        data.settings.jahresurlaubTage = jahresurlaubTage;
-        data.settings.fastiEnabled = fastiEnabled;
-        data.settings.zertifikate = zertifikate;
-        data.settings.buero = { email: bueroEmail };
-        data.settings.assessmentIntervalMonths = assessmentIntervalMonths;
-        data.settings.updatedAt = new Date().toISOString();
-      });
-
-      await queuePersistRuntimeData();
-
-      // Sofort wirksam machen, ohne dass ein erneutes Ein-/Ausloggen nötig
-      // ist - "aus" blendet Button+Panel sofort aus, "an" baut sie (falls
-      // gerade deaktiviert) mit frisch berechneten Hinweisen wieder auf.
-      if (fastiEnabled) {
-        showFastiNotices(buildFastiNotices(getRuntimeData()));
-      } else {
-        hideFastiWidget();
-      }
-
+      await saveGeneralSettings();
       msg.className = "success";
       msg.textContent = "Einstellungen gespeichert.";
     } catch (err) {
       console.error(err);
       msg.className = "error";
       msg.textContent = err?.message || "Einstellungen konnten nicht gespeichert werden.";
+    }
+  };
+
+  document.getElementById("changePinBtn").onclick = async () => {
+    const currentPin = document.getElementById("settingsCurrentPin").value;
+    const newPin = document.getElementById("settingsNewPin").value;
+    const newPinRepeat = document.getElementById("settingsNewPinRepeat").value;
+    const msg = document.getElementById("changePinMsg");
+
+    msg.className = "error";
+    msg.textContent = "";
+
+    if (!currentPin) {
+      msg.textContent = "Bitte die aktuelle PIN eingeben.";
+      return;
+    }
+
+    if (!newPin || newPin.length < 6) {
+      msg.textContent = "Die neue PIN muss mindestens 6 Zeichen haben.";
+      return;
+    }
+
+    if (newPin !== newPinRepeat) {
+      msg.textContent = "Die PIN stimmt nicht überein.";
+      return;
+    }
+
+    try {
+      // Erst die übrigen Einstellungen auf dieser Seite sichern (Name,
+      // Stunden, ...), damit beim PIN-Wechsel nichts verloren geht, was
+      // zwar eingegeben, aber noch nicht über "Änderungen speichern"
+      // gesichert wurde.
+      await saveGeneralSettings();
+
+      const updatedCryptoMeta = await changePIN({
+        currentPin,
+        newPin,
+        cryptoMeta: getCryptoMeta()
+      });
+      setCryptoMeta(updatedCryptoMeta);
+
+      document.getElementById("settingsCurrentPin").value = "";
+      document.getElementById("settingsNewPin").value = "";
+      document.getElementById("settingsNewPinRepeat").value = "";
+      msg.className = "success";
+      msg.textContent = "PIN geändert und Einstellungen gespeichert.";
+    } catch (err) {
+      console.error(err);
+      msg.className = "error";
+      msg.textContent = err?.message || "PIN konnte nicht geändert werden.";
     }
   };
 
@@ -3937,16 +4092,40 @@ function bindQuickDocHandlers({ homeId, patient, onSaved }) {
     }
   });
 
+  // Patientenweiter Fallback (Nutzerwunsch): ein gerade erst neu angelegtes
+  // Rezept hat naturgemäß noch KEINE eigenen Einträge - ohne Fallback wäre
+  // "Vom letzten Mal übernehmen" direkt nach einem Rezeptwechsel immer leer,
+  // bis man einmal neu dokumentiert hat. Sucht deshalb über ALLE Rezepte des
+  // Patienten hinweg (auch bereits abgegebene/archivierte) den zeitlich
+  // letzten Eintrag, damit die Übernahme-Funktion unabhängig davon
+  // funktioniert, ob gerade ein neues Rezept läuft oder nicht.
+  let patientWideLastEntry = null;
+  let patientWideLastEntryComparable = '';
+  (patient?.rezepte || []).forEach((rezept) => {
+    (rezept.entries || []).forEach((entry) => {
+      const comparable = parseDeDate(entry?.date) || '';
+      if (!comparable) return;
+      if (!patientWideLastEntry || comparable > patientWideLastEntryComparable) {
+        patientWideLastEntry = entry;
+        patientWideLastEntryComparable = comparable;
+      }
+    });
+  });
+
   function getSelectedQuickDocRezeptId() {
     if (quickDocRezepteForPreview.length === 1) return quickDocRezepteForPreview[0].rezeptId;
     const checked = document.querySelector(`.quickDocRezeptCheck[data-patient-id="${patientId}"]:checked`);
     return checked?.dataset.rezeptId || '';
   }
 
+  function getQuickDocLastEntry(rezeptId) {
+    return (rezeptId && lastEntryByRezeptId[rezeptId]) || patientWideLastEntry || null;
+  }
+
   function updateQuickDocLastEntryPreview(rezeptId) {
     const box = document.getElementById(`quickDocLastEntryBox-${patientId}`);
     if (!box) return;
-    const lastEntry = rezeptId ? lastEntryByRezeptId[rezeptId] : null;
+    const lastEntry = getQuickDocLastEntry(rezeptId);
     if (!lastEntry) {
       box.style.display = 'none';
       return;
@@ -3962,7 +4141,7 @@ function bindQuickDocHandlers({ homeId, patient, onSaved }) {
   if (useLastBtn) {
     useLastBtn.onclick = () => {
       const rezeptId = getSelectedQuickDocRezeptId();
-      const lastEntry = rezeptId ? lastEntryByRezeptId[rezeptId] : null;
+      const lastEntry = getQuickDocLastEntry(rezeptId);
       const textarea = document.getElementById(`quickDocText-${patientId}`);
       if (!lastEntry || !textarea) return;
       textarea.value = lastEntry.text || '';
