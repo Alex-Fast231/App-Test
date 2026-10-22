@@ -1,10 +1,22 @@
 # FaSt App – Handoff Summary
-**Stand:** 2026-10-21 (Session-Ende: Zeiterfassung/SchnellDoku ohne Rezept-Angaben, ausgeschiedene/verstorbene Patienten in eigenem Bereich)
+**Stand:** 2026-10-22 (Session-Ende: Abgabeliste-Markierung geprüft - nur Befreit, kein Doppeltermin-Blau mehr im aktuellen Code)
 **Branch:** `claude/fast-app-8-features-xep6yr` (in `/workspace/app-test`, lokal, **weiterhin nicht auf GitHub gepusht (403, siehe Abschnitt 3)**)
 
 **WICHTIGER HINWEIS ZU DIESER DATEI:** Diese Session startete in einem komplett frischen Container, dessen Code-Stand exakt dem von GitHub (`origin/main`) entsprach - und dieser GitHub-Stand lag inhaltlich bereits deutlich weiter als die zuletzt dokumentierten Abschnitte 1-14 hier unten (der Code enthielt bereits FaSti, die FaSt-Startdatum-Fristenfilter, "Vom letzten Mal übernehmen" u.v.m.). Vermutlich wurde bei einem oder mehreren der manuellen GitHub-Uploads durch den Nutzer die App aktualisiert, ohne jedes Mal auch eine aktualisierte `HANDOFF_SUMMARY.md` mitzunehmen - die Nummerierung unten (Abschnitte 1-14) ist dadurch NICHT mehr lückenlos zur tatsächlichen Code-Historie. Diese Session beginnt deshalb bewusst mit einem neuen, nicht fortlaufend nummerierten Abschnitt ganz oben, statt an Abschnitt 14 anzuknüpfen. **Für zukünftige Sessions:** Verlasst euch bei der Einschätzung "was gibt es schon" primär auf den tatsächlichen Code, nicht ausschließlich auf diese Datei.
 
 Diese Datei ersetzt die vorherige Version vom 2026-09-02 (elfte Session) vollständig. Die elfte Session bleibt unten in Abschnitt 11 als historische Dokumentation stehen.
+
+---
+
+## Aktuelle Session (22.10.2026): Abgabeliste-Markierung geprüft (nur Befreit, keine Doppeltermin-Hervorhebung mehr)
+
+Nutzermeldung: bei einem Ausdruck von vor zwei Wochen war eine blaue Markierung bei Doppelstunden zu sehen - laut Vorgabe soll die EINZIGE farbige Umrandung bei "Befreit" sein.
+
+**Ergebnis der Prüfung: der aktuelle Code ist bereits korrekt.** `renderAbgabeSheetHtml()` (`ui/views.js`) setzt die orangene Umrandung (`border:2px solid #c2410c`) ausschließlich anhand von `row.befreit` - für Doppeltermin-Rezepte (`row.dt`) gibt es im Code gar keinen eigenen Hervorhebungs-Zweig mehr, nur den schlichten Text "Doppelstunde" ohne jede Umrandung. Empirisch mit Playwright bestätigt: ein frisch erzeugter Testausdruck mit einer befreiten UND einer Doppeltermin-Patientin zeigt die orangene Umrandung nur bei der befreiten Patientin, die Doppeltermin-Zeile hat ein leeres `style`-Attribut. Ein veralteter Code-Kommentar ("Befreit (orange) hat Vorrang vor Doppeltermin (blau)") wurde entsprechend korrigiert, da er fälschlich suggerierte, es gäbe noch einen blauen Zweig.
+
+**Wahrscheinliche Erklärung für den beobachteten Altausdruck:** die blaue Doppeltermin-Hervorhebung wurde bereits in einer früheren Session entfernt (siehe Abschnitt 15 unten, "blaue Doppelstunden-Hervorhebung... wurde entfernt"). Der Ausdruck von vor zwei Wochen stammt vermutlich entweder von einem noch nicht aktualisierten Gerät, ODER wurde über den Abgabeliste-"Verlauf" erneut geöffnet/gedruckt - dort wird für bereits gespeicherte Einträge bewusst ein eingefrorenes `snapshotHtml` verwendet (historische Genauigkeit: ein einmal erstellter/versendeter Beleg soll sich nicht nachträglich ändern), sodass ein VOR der Entfernung erstellter Eintrag beim erneuten Öffnen weiterhin die alte (blaue) Fassung zeigt. Eine frisch NEU erzeugte Abgabeliste zeigt garantiert nur noch Befreit/orange.
+
+**Getestet** (neues Skript `smoketest_abgabeliste_markierung.mjs`, 3/3 grün, keine Page-Errors).
 
 ---
 

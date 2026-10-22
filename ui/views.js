@@ -6662,7 +6662,8 @@ function renderAbgabeSheetHtml(rows, options = {}) {
     </div>
     ${normalizedRows.map((row) => {
       // Rahmen-Hervorhebung nur im PDF/Ausdruck, nicht in der App-Ansicht:
-      // Befreit (orange) hat Vorrang vor Doppeltermin (blau).
+      // ausschließlich Befreit (orange) - die frühere blaue
+      // Doppeltermin-Hervorhebung wurde auf Nutzerwunsch entfernt.
       const highlightStyle = row.befreit
         ? "border:2px solid #c2410c; border-radius:8px; padding:8px 10px;"
         : "";
