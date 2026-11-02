@@ -8,6 +8,58 @@ Diese Datei ersetzt die vorherige Version vom 2026-09-02 (elfte Session) vollst�
 
 ---
 
+## Aktuelle Session (02.11.2026): Support-Seite in der App + FaSti-Stichwörter-Abgleich (Physio)
+
+Auftrag mit zwei Dateien: dem bereits in einer vorherigen Session erzeugten Leitfaden-PDF (hier als
+`FaSt-App-Leitfaden_1.pdf` neu re-templated zurückgeschickt, textlich identisch - per Seite-für-Seite-
+Sichtprüfung gegen das eigene `leitfaden.md` bestätigt) und einer neuen `support-suchbegriffe-physio.json`
+mit 47 Abschnitts-Einträgen (Anker/Titel/Stichwörter).
+
+**1. Support-Seite ersetzt die externe Wix-Seite.** Neue Datei `data/hilfe-inhalt.js`: der komplette
+Leitfaden-Text (20 Kapitel, 47 Abschnitte inkl. aller 6 nicht-nummerierten Sonder-Anker wie
+`4-fristenrechner` oder `18-pin`), wortgleich aus dem Leitfaden übernommen, blockbasiert (`text`,
+`ueberschrift`, `liste`, `schritte`, `tabelle` statt freiem HTML im Text) mit Kommentar oben zum
+Bearbeiten/Ergänzen. `ui/views.js` bekam eine neue `showSupportView()` mit Kopf+Zurück-Button, Live-Suche
+(beim Tippen, umlaut-/großschreibungs-unabhängig über eine eigene `normalizeSupportSearchText()`), einem
+Inhaltsverzeichnis mit allen 20 Kapiteln (Tipp öffnet+scrollt), aufklappbaren, standardmäßig zugeklappten
+Kapiteln und farbiger Treffer-Markierung im Text. Der `openSupportBtn`-Klick-Handler ruft jetzt
+`showSupportView()` statt `window.open("https://physiofast.wixsite.com/...")` - der Wix-Link ist komplett
+entfernt (per Grep bestätigt). Die FAQ-Seite (`showFaqView`, Fristenrechner) bleibt unverändert und
+getrennt, FaSti ist auf der Support-Seite nirgends eingebunden. **Kapitel 20 ("Support") wurde bewusst
+NICHT inhaltlich angepasst** (beschreibt weiterhin die alte externe Seite) - der Nutzer wollte diesen
+Text selbst anpassen.
+
+**2. FaSti-Stichwörter konservativ abgeglichen** (`modules/fasti.js`): pro Ergänzung einzeln geprüft, ob
+sie zu einem BESTEHENDEN Thema passt und nicht von einem allgemeineren, vorher geprüften Stichwort
+"verschattet" wird (z.B. wurde "behandlungsbeginn" bewusst NICHT zu "frist" ergänzt, weil es die
+Teilzeichenkette "behandlung" enthält und dadurch nie über den weiter vorne stehenden "rezept"-Intent
+hinauskäme - "folgerezept"/"folgeverordnung" wurden deshalb nicht als Intent-Stichwort, sondern direkt als
+Trigger-Phrase am Befehl `nachbestellungsuebersicht_oeffnen` ergänzt, der schon vor den Intents geprüft
+wird). Ergänzt: `bbs`/`sturzrisiko`/`gleichgewicht` (Assessment-Intent), `abgelaufen` (Fristen-Intent),
+`folgerezept`/`folgeverordnung` (Nachbestellungs-Befehl), `doku schreiben`/`behandlung eintragen`
+(Doku-schreiben-Befehl), `schnelldoku` (Doku-Liste-Befehl), `kuvert` (Freikuvert-Befehl). Bewusst NICHT
+übernommen: generische Wörter wie "test", "fahrt", "abgeben", "vo anlegen" sowie alles rein
+rezept-feldbezogene (ICD, Heilmittel, Hausbesuch ...), da dafür ohnehin kein FaSti-Befehl existiert und
+der Auftrag ausdrücklich keine neuen Fähigkeiten vorsah. Mit Playwright `answerFastiChat()` direkt
+getestet: alle drei im Auftrag genannten Bestands-Befehle ("Trage 40 Minuten ...", "Nachbestellung für
+Dr. ...", "Ich bin vom 1.10. bis 5.10. im Urlaub") sowie alle neuen Stichwörter funktionieren wie
+erwartet, keine Regression.
+
+**3. `fasti-befehle.md` neu angelegt** - alle Befehle nach dem Abgleich, nach Thema gruppiert (Doku, Zeit,
+Stunden, Rezept, Assessment, Zuzahlung, Nachbestellung, Fristen, Urlaub/Krank, Kilometer, Freikuvert,
+Navigation, Patienten/Einrichtungen verwalten), je mit Beispielsatz, Stichwörtern und Auskunft/Änderung-
+Kennzeichnung (Änderungen fragen immer erst nach Bestätigung) - Grundlage für den gedruckten
+FaSti-Spickzettel.
+
+**Getestet:** `node --check` auf beiden geänderten/neuen JS-Dateien; alle 7 geforderten Suchbegriffe aus
+dem Abnahmetest (Fristenchecker→`4-fristenrechner`, frist→`4-fristenrechner`, Kuvert→16, Folgerezept→11,
+Daten weg→19.1, PIN→`18-pin`, ueberstunden ohne Umlaut→8.2/8.5) per Playwright direkt gegen die echte
+`showSupportView()`-Logik im Browser verifiziert (nicht nur gegen eine Nachbau-Logik); dabei auch TOC-
+Klick (öffnet+scrollt zum richtigen Kapitel), Treffer-Markierung im Text, leeres Suchfeld→TOC, die exakte
+"Nichts gefunden..."-Meldung und das vollständige Fehlen von "wixsite" im DOM bestätigt.
+
+---
+
 ## Aktuelle Session (22.10.2026): Abgabeliste-Markierung geprüft (nur Befreit, keine Doppeltermin-Hervorhebung mehr)
 
 Nutzermeldung: bei einem Ausdruck von vor zwei Wochen war eine blaue Markierung bei Doppelstunden zu sehen - laut Vorgabe soll die EINZIGE farbige Umrandung bei "Befreit" sein.
