@@ -8,6 +8,43 @@ Diese Datei ersetzt die vorherige Version vom 2026-09-02 (elfte Session) vollst�
 
 ---
 
+## Aktuelle Session (05.11.2026): Rezeptoptimierer-"Übernehmen" entfernt, HB-Pauschale ohne Vorauswahl, Zertifikate-Wortlaut korrigiert
+
+Drei vom Nutzer anhand von Screenshots der Support-Seite gemeldete Punkte:
+
+**1. Rezeptoptimierer legte vorab ein Rezept an, bevor der Arzt es überhaupt ausgestellt hatte.** Der
+Button „Übernehmen" übertrug ICD-10/Leitsymptomatik/Heilmittel direkt in ein neues, vorausgefülltes
+Rezept-Formular - fachlich problematisch, da so ein Rezept technisch existieren konnte, ohne dass der
+Arzt es bereits ausgestellt hat. Button und Handler in `renderOptimierungErgebnisCard()`/
+`bindErgebnisActions()` (`ui/views.js`) komplett entfernt, nur noch **„PDF für Arzt-Fax"** bleibt. Die
+„Zuletzt verwendete Diagnosen"-Funktion (merkt sich Diagnosen für den Button „Erneut verwenden") hing
+bisher ausschließlich am entfernten Übernehmen-Button (`saveDiagnoseZuordnung()`, einziger Aufrufer) -
+damit sie nicht stillschweigend leerläuft, wird sie jetzt beim Klick auf „PDF für Arzt-Fax" aufgerufen.
+`showCreateRezeptView()` verlor dadurch seinen einzigen Aufrufer mit `prefill`-Parameter - Parameter und
+alle davon abhängigen Zweige (Vorausfüll-Hinweistext, vorausgefüllte Felder) als toten Code
+mitentfernt.
+
+**2. „HB-Pauschale" hatte beim Anlegen einer neuen Einrichtung „HB" fest vorausgewählt**, obwohl das
+laut Nutzer immer von der jeweiligen Einrichtung abhängt und keinen sinnvollen allgemeinen Standard
+gibt. Radio-Button-Vorauswahl entfernt, Formular verlangt jetzt eine explizite Auswahl (Fehlermeldung
+„Bitte HB-Pauschale auswählen", kein stillschweigender Rückfall auf „HB" mehr) - `modules/homes.js`
+(`createHome()`) bewusst unverändert gelassen, dessen Default bleibt nur als Funktions-interne
+Absicherung bestehen, wird über den UI-Pfad aber nie mehr erreicht.
+
+**3. Die Hilfe-Seite beschrieb die Rezeptoptimierer-Zertifikate (KG-ZNS/MT/MLD) fälschlich als
+„Zertifikate der Praxis"** - tatsächlich sind das persönliche Zusatzqualifikationen des Therapeuten
+(die App speichert ohnehin nur die Daten einer einzelnen Person pro Installation). In
+`data/hilfe-inhalt.js` Kapitel 6 auf „Zusatz-Zertifikate des Therapeuten" korrigiert (2 Stellen) und
+gleich die „(Standard: HB)"-Formulierung in Kapitel 2.1 entsprechend korrigiert, da sie am selben
+fehlerhaften Standard-Konzept hing.
+
+**Getestet** (Playwright, direkt gegen den echten Code): Heim ohne HB-Pauschale-Auswahl → Validierungs-
+fehler, nichts gespeichert; mit expliziter Auswahl → korrekt gespeichert. Rezeptoptimierer-Ergebnis-
+Karte zeigt nachweislich keinen Übernehmen-Button mehr, nur noch „PDF für Arzt-Fax"; ein Klick darauf
+legt weiterhin einen „Zuletzt verwendete Diagnosen"-Eintrag an.
+
+---
+
 ## Aktuelle Session (02.11.2026): Support-Seite in der App + FaSti-Stichwörter-Abgleich (Physio)
 
 Auftrag mit zwei Dateien: dem bereits in einer vorherigen Session erzeugten Leitfaden-PDF (hier als

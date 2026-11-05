@@ -3781,9 +3781,10 @@ export function showHomesView({ onLock, searchText = "" }) {
           <input id="homeVerwaltungsEmail" type="email" placeholder="verwaltung@einrichtung.de">
 
           <label>HB-Pauschale</label>
+          <p class="muted" style="margin-top:-6px;">Richtet sich nach der jeweiligen Einrichtung, es gibt keinen allgemein gültigen Standardwert.</p>
           <div class="row" style="gap:12px;">
             <label class="check-chip" style="justify-content:flex-start;">
-              <input type="radio" name="homePauschale" value="HB" checked>
+              <input type="radio" name="homePauschale" value="HB">
               <span>HB</span>
             </label>
             <label class="check-chip" style="justify-content:flex-start;">
@@ -3809,7 +3810,7 @@ export function showHomesView({ onLock, searchText = "" }) {
     const name = document.getElementById("homeName").value.trim();
     const adresse = document.getElementById("homeAddress").value.trim();
     const verwaltungsEmail = document.getElementById("homeVerwaltungsEmail").value.trim();
-    const hbPauschale = document.querySelector('input[name="homePauschale"]:checked')?.value || "HB";
+    const hbPauschale = document.querySelector('input[name="homePauschale"]:checked')?.value || "";
     const msg = document.getElementById("homeMsg");
 
     msg.className = "error";
@@ -3817,6 +3818,11 @@ export function showHomesView({ onLock, searchText = "" }) {
 
     if (!name) {
       msg.textContent = "Bitte einen Heimnamen eingeben.";
+      return;
+    }
+
+    if (!hbPauschale) {
+      msg.textContent = "Bitte HB-Pauschale auswählen (richtet sich nach der Einrichtung).";
       return;
     }
 
@@ -5836,8 +5842,7 @@ function renderOptimierungErgebnisCard(ergebnis, { primary = false } = {}) {
         ${ergebnis.bvb ? `<br><span class="pill-orange">Besonderer Verordnungsbedarf: ${escapeHtml(ergebnis.bvb)}</span>` : ""}
       </div>
       <div class="row" style="margin-top:10px;">
-        <button class="optimierungUebernehmenBtn" data-icd="${escapeHtml(ergebnis.icd)}" data-empfehlung="${escapeHtml(ergebnis.empfehlung)}" data-gruppe="${escapeHtml(ergebnis.gruppe)}" data-gruppelabel="${escapeHtml(ergebnis.gruppeLabel || '')}" data-maxprovo="${ergebnis.maxProVO}" data-orientierendemenge="${ergebnis.orientierendeMenge}" data-lhb="${ergebnis.lhb ? '1' : '0'}" data-eingabe="${escapeHtml(ergebnis.eingabe || ergebnis.icd)}">Übernehmen</button>
-        <button class="optimierungPdfBtn secondary" data-icd="${escapeHtml(ergebnis.icd)}" data-empfehlung="${escapeHtml(ergebnis.empfehlung)}" data-gruppe="${escapeHtml(ergebnis.gruppe)}" data-gruppelabel="${escapeHtml(ergebnis.gruppeLabel || '')}" data-maxprovo="${ergebnis.maxProVO}" data-orientierendemenge="${ergebnis.orientierendeMenge}" data-diagnose="${escapeHtml(ergebnis.diagnose || '')}" data-lhb="${ergebnis.lhb ? '1' : '0'}" data-bvb="${escapeHtml(ergebnis.bvb || '')}">PDF für Arzt-Fax</button>
+        <button class="optimierungPdfBtn" data-icd="${escapeHtml(ergebnis.icd)}" data-empfehlung="${escapeHtml(ergebnis.empfehlung)}" data-gruppe="${escapeHtml(ergebnis.gruppe)}" data-gruppelabel="${escapeHtml(ergebnis.gruppeLabel || '')}" data-maxprovo="${ergebnis.maxProVO}" data-orientierendemenge="${ergebnis.orientierendeMenge}" data-diagnose="${escapeHtml(ergebnis.diagnose || '')}" data-lhb="${ergebnis.lhb ? '1' : '0'}" data-bvb="${escapeHtml(ergebnis.bvb || '')}" data-eingabe="${escapeHtml(ergebnis.eingabe || ergebnis.icd)}">PDF für Arzt-Fax</button>
       </div>
     </div>
   `;
@@ -5935,52 +5940,8 @@ export function showRezeptoptimierungView({ onLock, homeId, patientId, returnTo 
   }
 
   function bindErgebnisActions(container) {
-    container.querySelectorAll(".optimierungUebernehmenBtn").forEach((btn) => {
-      btn.onclick = async () => {
-        const icd10 = btn.dataset.icd;
-        const empfehlung = btn.dataset.empfehlung;
-        const gruppe = btn.dataset.gruppe;
-        const gruppeLabel = btn.dataset.gruppelabel;
-        const maxProVO = btn.dataset.maxprovo;
-        const orientierendeMenge = btn.dataset.orientierendemenge;
-        const lhb = btn.dataset.lhb === "1";
-        const eingabe = btn.dataset.eingabe;
-        // Bei langfristigem Heilmittelbedarf (LHB) darf die verordnete Menge
-        // über dem Regelfall-Höchstwert je VO liegen (orientierende Menge
-        // aus dem Heilmittelkatalog statt pauschal maxProVO).
-        const empfohleneMenge = lhb ? (orientierendeMenge || maxProVO) : maxProVO;
-
-        try {
-          saveDiagnoseZuordnung(homeId, patientId, {
-            input: eingabe,
-            icd10,
-            gruppe,
-            gruppeLabel,
-            empfehlung
-          });
-          await queuePersistRuntimeData();
-
-          showCreateRezeptView({
-            onLock,
-            homeId,
-            patientId,
-            returnTo,
-            prefill: {
-              icd10,
-              leitsymptomatik: getDefaultLeitsymptomatik(gruppe),
-              itemType: EMPFEHLUNG_ZU_ITEM_TYPE[empfehlung] || "KG",
-              count: empfohleneMenge || ""
-            }
-          });
-        } catch (err) {
-          console.error(err);
-          alert(err?.message || "Diagnose-Zuordnung konnte nicht gespeichert werden.");
-        }
-      };
-    });
-
     container.querySelectorAll(".optimierungPdfBtn").forEach((btn) => {
-      btn.onclick = () => {
+      btn.onclick = async () => {
         const ergebnis = {
           icd: btn.dataset.icd,
           empfehlung: btn.dataset.empfehlung,
@@ -5992,6 +5953,26 @@ export function showRezeptoptimierungView({ onLock, homeId, patientId, returnTo 
           lhb: btn.dataset.lhb === "1",
           bvb: btn.dataset.bvb || null
         };
+
+        // Merkt sich die Diagnose für "Zuletzt verwendete Diagnosen" - der
+        // Rezeptoptimierer legt bewusst kein Rezept mehr automatisch an
+        // (siehe Entfernung des früheren "Übernehmen"-Buttons: ein Rezept
+        // darf erst existieren, wenn der Arzt es tatsächlich ausgestellt
+        // hat), das Anschreiben an den Arzt bleibt aber ein sinnvoller
+        // Zeitpunkt, sich die verwendete Diagnose zu merken.
+        try {
+          saveDiagnoseZuordnung(homeId, patientId, {
+            input: btn.dataset.eingabe,
+            icd10: ergebnis.icd,
+            gruppe: ergebnis.gruppe,
+            gruppeLabel: ergebnis.gruppeLabel,
+            empfehlung: ergebnis.empfehlung
+          });
+          await queuePersistRuntimeData();
+        } catch (err) {
+          console.error(err);
+        }
+
         const bodyHtml = buildOptimierungLetterHtml(ergebnis);
         openHtmlDocument("Verordnungsvorschlag", bodyHtml, { autoPrint: false });
       };
@@ -6117,16 +6098,13 @@ export function showRezeptoptimierungView({ onLock, homeId, patientId, returnTo 
   document.getElementById("findOptimumBtn").onclick = runOptimierung;
 }
 
-export function showCreateRezeptView({ onLock, homeId, patientId, prefill = null, returnTo = null }) {
+export function showCreateRezeptView({ onLock, homeId, patientId, returnTo = null }) {
   bindLockButton(onLock);
   setCurrentView("rezept-create", { homeId, patientId, returnTo });
-
-  const prefillItems = prefill?.itemType ? [{ type: prefill.itemType, count: prefill.count || "" }] : [];
 
   render(`
     <div class="card">
       <h2>Neues Rezept</h2>
-      ${prefill ? `<p class="muted">Vorausgefüllt aus der Rezeptoptimierung. Bitte prüfen und ggf. anpassen.</p>` : ""}
       <button id="backPatientBtn" class="secondary">Zurück zum Patienten</button>
     </div>
 
@@ -6143,15 +6121,15 @@ export function showCreateRezeptView({ onLock, homeId, patientId, prefill = null
       <input id="ausstell" type="text" placeholder="TT.MM.JJJJ" inputmode="numeric">
 
       <label for="icd10">ICD-10 Code</label>
-      <input id="icd10" type="text" placeholder="z.B. M54.5" value="${escapeHtml(prefill?.icd10 || "")}">
+      <input id="icd10" type="text" placeholder="z.B. M54.5">
 
       <label for="icd10b">2. ICD-10 Code (optional)</label>
-      <input id="icd10b" type="text" placeholder="z.B. M54.5" value="${escapeHtml(prefill?.icd10b || "")}">
+      <input id="icd10b" type="text" placeholder="z.B. M54.5">
 
-      ${renderLeitsymptomatikField(prefill?.leitsymptomatik || "")}
+      ${renderLeitsymptomatikField("")}
 
       <h3 style="margin-top:20px;">Leistungen</h3>
-      ${renderRezeptItemsEditor(prefillItems)}
+      ${renderRezeptItemsEditor([])}
 
       <h3 style="margin-top:20px;">Rezeptprüfung</h3>
       <div class="checkbox-row">
@@ -6186,7 +6164,7 @@ export function showCreateRezeptView({ onLock, homeId, patientId, prefill = null
   bindDateAutoFormat(document.getElementById("ausstell"));
   bindIcdAutoFormat(document.getElementById("icd10"));
   bindIcdAutoFormat(document.getElementById("icd10b"));
-  bindRezeptItemsEditor(prefillItems);
+  bindRezeptItemsEditor([]);
   bindCheckChipToggles(app);
   bindQuickDocSelectionStyles(app);
   bindSelectableCardChecks(app);

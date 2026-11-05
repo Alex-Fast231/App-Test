@@ -133,7 +133,7 @@ export const HILFE_KAPITEL = [
             `Im Dashboard auf **„Einrichtungen"** klicken.`,
             `In der Karte „Heimübersicht" den Bereich **„Neues Heim anlegen"** aufklappen.`,
             `Felder ausfüllen: **„Name"**, **„Adresse"**, **„Verwaltungs-E-Mail"**.`,
-            `Unter **„HB-Pauschale"** zwischen **„HB"** und **„HBHP"** wählen (Standard: HB).`,
+            `Unter **„HB-Pauschale"** zwischen **„HB"** und **„HBHP"** wählen – richtet sich nach der jeweiligen Einrichtung, es gibt keinen allgemein gültigen Standardwert.`,
             `Auf **„Heim speichern"** klicken.`
           ]},
           { typ: "text", text: `Über das Stift-Symbol ✎ an jeder Einrichtung lassen sich dieselben Felder nachträglich ändern (Button „Speichern") oder die Einrichtung über „Heim löschen" entfernen (mit Sicherheitsabfrage – löscht auch alle zugehörigen Patienten, Rezepte und Dokumentationen).` }
@@ -367,22 +367,18 @@ export const HILFE_KAPITEL = [
         stichwoerter: ["rezeptoptimierer", "optimierer", "optimieren", "optimale verordnung", "beste verordnung", "welches heilmittel", "diagnose eingeben", "diagnosegruppe", "heilmittelkatalog", "lhb", "langfristiger heilmittelbedarf", "arzt-fax", "arztfax", "orientierende menge"],
         bloecke: [
           { typ: "ueberschrift", text: `Zweck` },
-          { typ: "text", text: `Schlägt anhand einer eingegebenen Diagnose (ICD-10-Code oder Freitext wie „Rückenschmerzen") automatisch das laut Heilmittelkatalog passende Heilmittel sowie Mengen-/Diagnosegruppen-Angaben vor. Berücksichtigt die in den Einstellungen hinterlegten Zusatz-Zertifikate der Praxis (KG-ZNS, MT, MLD) – ohne diese basieren die Vorschläge nur auf „KG".` },
+          { typ: "text", text: `Schlägt anhand einer eingegebenen Diagnose (ICD-10-Code oder Freitext wie „Rückenschmerzen") automatisch das laut Heilmittelkatalog passende Heilmittel sowie Mengen-/Diagnosegruppen-Angaben vor. Berücksichtigt die in den Einstellungen hinterlegten Zusatz-Zertifikate des Therapeuten (KG-ZNS, MT, MLD) – ohne diese basieren die Vorschläge nur auf „KG".` },
           { typ: "ueberschrift", text: `Aufruf` },
           { typ: "text", text: `Dashboard → **„👤 Patienten"** → bei einem Patienten auf **„Rezeptoptimierer"** klicken.` },
           { typ: "ueberschrift", text: `Bedienung` },
           { typ: "schritte", items: [
-            `Oben: Karte „Zertifikate" zeigt die aktiven Zusatz-Zertifikate der Praxis.`,
+            `Oben: Karte „Zertifikate" zeigt die aktiven Zusatz-Zertifikate des Therapeuten.`,
             `Ggf. Karte „Zuletzt verwendete Diagnosen" mit Button „Erneut verwenden".`,
             `Diagnose eintippen (Freitext oder ICD-10-Code) und auf **„Hinzufügen"** klicken. Mehrere Diagnosen möglich (Chips, über „×" entfernbar).`,
             `Auf **„Optimale Verordnung finden"** klicken.`
           ]},
           { typ: "ueberschrift", text: `Ergebnis` },
-          { typ: "text", text: `Abschnitt **„✓ Beste Verordnung"** zeigt: empfohlenes Heilmittel, erkannte Diagnose, ICD-10-Code, Diagnosegruppe, „Max. je VO", „Orient. Menge", ggf. „LHB möglich" (langfristiger Heilmittelbedarf). Zwei Buttons:` },
-          { typ: "liste", items: [
-            `**„Übernehmen"** – überträgt ICD-10, Leitsymptomatik und Heilmittel direkt in ein neues Rezept-Formular.`,
-            `**„PDF für Arzt-Fax"** – erzeugt ein druckbares Anschreiben an den Arzt mit allen Angaben.`
-          ]},
+          { typ: "text", text: `Abschnitt **„✓ Beste Verordnung"** zeigt: empfohlenes Heilmittel, erkannte Diagnose, ICD-10-Code, Diagnosegruppe, „Max. je VO", „Orient. Menge", ggf. „LHB möglich" (langfristiger Heilmittelbedarf). Button **„PDF für Arzt-Fax"** erzeugt ein druckbares Anschreiben an den Arzt mit allen Angaben – ein Rezept wird dabei bewusst nicht automatisch angelegt, das Formular lässt sich erst öffnen, nachdem der Arzt es tatsächlich ausgestellt hat (siehe Abschnitt 3.1).` },
           { typ: "text", text: `Weitere passende Optionen erscheinen unter „Weitere Optionen". Konnte eine Diagnose nicht zugeordnet werden: „Nicht erkannt: […] – bitte ICD-10-Code direkt eingeben oder manuell prüfen."` }
         ]
       }
